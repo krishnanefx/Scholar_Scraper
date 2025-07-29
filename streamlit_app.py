@@ -270,111 +270,20 @@ def normalize_interest_phrases(raw_text):
     return processed
 
 @st.cache_resource(ttl=3600) # Cache for 1 hour
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+
 def get_driver():
-    st.info("Initializing Selenium WebDriver (this may take a moment)...")
-    
-    # Define paths for Chrome and Chromedriver on Streamlit Cloud
-    CHROME_PATH = "/usr/bin/google-chrome" # Path where Google Chrome will be installed
-    CHROMEDRIVER_PATH = "/usr/local/bin/chromedriver" # Path where Chromedriver will be installed
-
-    # Check if Chrome and Chromedriver are already downloaded and executable
-    if not os.path.exists(CHROME_PATH) or not os.path.exists(CHROMEDRIVER_PATH):
-        st.warning("Chromium or Chromedriver not found. Attempting to download...")
-        try:
-            # Fetch the JSON directly using requests
-            response = requests.get("https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json")
-            response.raise_for_status() # Raise an exception for HTTP errors
-            versions_data = response.json()
-
-            # Get the latest stable Chrome version and its corresponding Chromedriver URL for linux64
-            latest_stable_chrome_version = versions_data['channels']['Stable']['version']
-            chromedriver_url = None
-
-            for download_entry in versions_data['channels']['Stable']['downloads']['chromedriver']:
-                if download_entry['platform'] == 'linux64':
-                    chromedriver_url = download_entry['url']
-                    break
-            
-            if not chromedriver_url:
-                st.error("Could not find linux64 Chromedriver download URL for latest stable Chrome.")
-                raise Exception("Chromedriver URL determination failed.")
-
-            st.info(f"Latest Stable Chrome Version: {latest_stable_chrome_version}")
-            st.info(f"Matching Chromedriver URL: {chromedriver_url}")
-
-            # Download Google Chrome (Debian package)
-            chrome_download_url = f"https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
-            st.info(f"Downloading Google Chrome stable from {chrome_download_url}...")
-            os.system(f"wget {chrome_download_url} -O /tmp/google-chrome-stable_current_amd64.deb")
-            # Install Chrome and resolve dependencies using dpkg, falling back to apt-get -f install
-            os.system("sudo dpkg -i /tmp/google-chrome-stable_current_amd64.deb || sudo apt-get update && sudo apt-get install -fy")
-            
-            # Create a symlink from /opt/google/chrome/google-chrome to /usr/bin/google-chrome
-            # if it doesn't already exist, for consistent PATH access
-            if not os.path.exists("/usr/bin/google-chrome"):
-                os.system("sudo ln -s /opt/google/chrome/google-chrome /usr/bin/google-chrome")
-            
-            if not os.path.exists(CHROME_PATH):
-                st.error(f"Google Chrome not found at {CHROME_PATH} after installation.")
-                raise Exception("Google Chrome installation failed.")
-            st.success("Google Chrome installed!")
-
-            # Download and setup Chromedriver
-            st.info(f"Downloading Chromedriver from {chromedriver_url}...")
-            os.system(f"wget {chromedriver_url} -O /tmp/chromedriver.zip")
-            os.system(f"unzip -o /tmp/chromedriver.zip -d /tmp/chromedriver_extracted")
-            
-            # The extracted chromedriver might be in a subdir, e.g., /tmp/chromedriver_extracted/chromedriver-linux64/chromedriver
-            # Need to find the actual executable within the unzipped directory
-            extracted_driver_path = ""
-            for root, dirs, files in os.walk("/tmp/chromedriver_extracted"):
-                if "chromedriver" in files:
-                    extracted_driver_path = os.path.join(root, "chromedriver")
-                    break
-            
-            if not extracted_driver_path:
-                st.error("Chromedriver executable not found in the extracted zip.")
-                raise Exception("Chromedriver extraction failed.")
-
-            os.system(f"sudo mv {extracted_driver_path} {CHROMEDRIVER_PATH}")
-            os.system(f"sudo chmod +x {CHROMEDRIVER_PATH}")
-
-            if not os.path.exists(CHROMEDRIVER_PATH):
-                st.error(f"Chromedriver not found at {CHROMEDRIVER_PATH} after installation.")
-                raise Exception("Chromedriver installation failed.")
-            st.success("Chromedriver installed!")
-
-        except Exception as e:
-            st.error(f"Failed to set up Chrome and Chromedriver dynamically: {e}")
-            st.exception(e) # Show full traceback in Streamlit
-            st.stop() # Stop the app if setup fails
-
     options = Options()
     options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--proxy-server='direct://'")
-    options.add_argument("--proxy-bypass-list=*")
-    options.add_argument("--start-maximized")
-    options.add_argument("--no-zygote")
+    options.binary_location = "/usr/bin/google-chrome-stable"
 
-    try:
-        driver = webdriver.Chrome(
-            executable_path=CHROMEDRIVER_PATH,
-            options=options,
-            # service_args=["--verbose", "--log-path=/tmp/chromedriver.log"] # Uncomment for debugging
-        )
-        st.success("Selenium WebDriver initialized successfully!")
-    except Exception as e:
-        st.error(f"Failed to initialize Chrome driver. Error: {e}")
-        st.error("Ensure Chrome and Chromedriver are correctly installed and compatible.")
-        st.exception(e) # Display full exception details in the UI
-        st.stop() # Stop the app if the driver fails to initialize
+    service = Service("/usr/bin/chromedriver")
+    driver = webdriver.Chrome(service=service, options=options)
     return driver
-
 
 def extract_profile(driver, user_id, depth):
     url = f"https://scholar.google.com/citations?hl=en&user={user_id}"
