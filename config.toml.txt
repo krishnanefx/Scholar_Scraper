@@ -1,0 +1,4 @@
+[tool]
+# Tell Streamlit to run a post-install command
+# This will execute `python -m playwright install` after pip installs all requirements.
+command = "python -m playwright install"
