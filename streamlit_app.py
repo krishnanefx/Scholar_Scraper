@@ -269,18 +269,23 @@ def normalize_interest_phrases(raw_text):
         processed.append(interest)
     return processed
 
+import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 
+@st.cache_resource(show_spinner="Initializing Selenium WebDriver...")
 def get_driver():
+    chrome_path = "/usr/bin/google-chrome-stable"
+    chromedriver_path = "/usr/bin/chromedriver"
+
     options = Options()
-    options.add_argument("--headless=new")  # Use modern headless mode
+    options.add_argument("--headless=new")  # Modern headless mode
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.binary_location = "/usr/bin/google-chrome-stable"
+    options.binary_location = chrome_path
 
-    service = Service(executable_path="/usr/bin/chromedriver")
+    service = Service(executable_path=chromedriver_path)
     driver = webdriver.Chrome(service=service, options=options)
     return driver
 
