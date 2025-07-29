@@ -10,3 +10,10 @@ libpango-1.0-0
 libcairo2
 libgdk-pixbuf2.0-0
 libatspi2.0-0
+firefox
+libnss3
+libxss1
+libappindicator1
+libindicator7
+fonts-liberation
+libasound2
