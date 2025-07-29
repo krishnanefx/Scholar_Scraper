@@ -269,8 +269,6 @@ def normalize_interest_phrases(raw_text):
         processed.append(interest)
     return processed
 
-@st.cache_resource(ttl=3600) # Cache for 1 hour
-
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
