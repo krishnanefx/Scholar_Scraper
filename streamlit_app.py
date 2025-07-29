@@ -610,7 +610,7 @@ if col1.button("Start/Resume Crawl", disabled=st.session_state.is_crawling):
 
     st.session_state.is_crawling = True
     st.session_state.status_message = "Crawl started..."
-    st.experimental_rerun() # Trigger a rerun to start the crawl loop
+    # st.experimental_rerun() # Trigger a rerun to start the crawl loop
 
 if col2.button("Stop Crawl", disabled=not st.session_state.is_crawling):
     st.session_state.is_crawling = False
