@@ -275,12 +275,12 @@ from selenium.webdriver.chrome.options import Options
 
 def get_driver():
     options = Options()
-    options.add_argument("--headless")
+    options.add_argument("--headless=new")  # Use modern headless mode
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.binary_location = "/usr/bin/google-chrome-stable"
 
-    service = Service("/usr/bin/chromedriver")
+    service = Service(executable_path="/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=options)
     return driver
 
