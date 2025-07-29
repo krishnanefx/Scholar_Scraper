@@ -24,16 +24,6 @@ import torch
 import mwparserfromhell # Added as it was used in clean_wiki_markup
 import requests # Added for web requests
 
-Okay, I understand you want to try running playwright install directly within your streamlit_app.py as a temporary measure to get past the deployment hurdle, even with the stated drawbacks.
-
-While I strongly reiterate the "Not Recommended for Production" warning due to performance and robustness issues, here's how you can implement it using subprocess.run(), which is generally preferred over os.system() for better control and error handling.
-
-You should place this code early in your streamlit_app.py, ideally before any Playwright-related imports or usage, but also ideally within a block that ensures it only runs once or very rarely.
-
-Here's how you can do it, with a crucial addition to make it run only once per deployment/session:
-
-Python
-
 import streamlit as st
 import subprocess
 import sys
