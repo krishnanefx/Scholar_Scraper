@@ -1,16 +1,15 @@
 streamlit
-selenium
-beautifulsoup4
-networkx
-tqdm
-sentence-transformers
-scikit-learn
-fuzzywuzzy
-python-Levenshtein
 pandas
+tldextract
+beautifulsoup4
+selenium
+networkx
+numpy
+fuzzywuzzy
+python-Levenshtein # Highly recommended for faster fuzzywuzzy performance
+sentence-transformers
+transformers
+torch # Note: Torch installation can be complex depending on your system (CPU/GPU). You might need to install it separately if you face issues with pip.
 mwparserfromhell
 requests
-torch
-transformers
-webdriver-manager
-tldextract  # <--- Add this line!
+webdriver-manager # Used by get_driver function to manage Chrome driver
