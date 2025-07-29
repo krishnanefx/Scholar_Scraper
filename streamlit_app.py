@@ -272,33 +272,114 @@ def normalize_interest_phrases(raw_text):
 @st.cache_resource(ttl=3600) # Cache for 1 hour
 def get_driver():
     st.info("Initializing Selenium WebDriver (this may take a moment)...")
+    
+    # Define paths for Chrome and Chromedriver on Streamlit Cloud
+    CHROME_PATH = "/usr/bin/google-chrome" # Path where Google Chrome will be installed
+    CHROMEDRIVER_PATH = "/usr/local/bin/chromedriver" # Path where Chromedriver will be installed
+
+    # Check if Chrome and Chromedriver are already downloaded and executable
+    if not os.path.exists(CHROME_PATH) or not os.path.exists(CHROMEDRIVER_PATH):
+        st.warning("Chromium or Chromedriver not found. Attempting to download...")
+        # Download Google Chrome (Debian package)
+        try:
+            # Get latest stable Chrome version
+            chrome_version_output = os.popen(
+                "wget -q -O - https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json | grep -oP '\"LATEST_RELEASE_([0-9.]+)\"' | head -1 | cut -d'_' -f3 | cut -d'\"' -f1"
+            ).read().strip()
+
+            if not chrome_version_output:
+                st.error("Could not determine latest Chrome stable version.")
+                raise Exception("Chrome version determination failed.")
+
+            # Download URL for the latest stable Chrome (x86_64, .deb)
+            # This URL is for Google Chrome itself, which is often easier to install than chromium-browser
+            chrome_download_url = f"https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+            
+            st.info(f"Downloading Google Chrome stable from {chrome_download_url}...")
+            os.system(f"wget {chrome_download_url} -O /tmp/google-chrome-stable_current_amd64.deb")
+            os.system("sudo dpkg -i /tmp/google-chrome-stable_current_amd64.deb || sudo apt-get install -fy")
+            
+            # This will install Chrome to /opt/google/chrome/google-chrome,
+            # we want a symlink to /usr/bin for consistent access
+            if not os.path.exists("/usr/bin/google-chrome"):
+                os.system("sudo ln -s /opt/google/chrome/google-chrome /usr/bin/google-chrome")
+            
+            if not os.path.exists(CHROME_PATH):
+                st.error(f"Google Chrome not found at {CHROME_PATH} after installation.")
+                raise Exception("Google Chrome installation failed.")
+            st.success("Google Chrome installed!")
+
+            # Download Chromedriver matching the installed Chrome version
+            # Fetch the exact version of the installed Chrome
+            installed_chrome_version_output = os.popen("google-chrome --version").read().strip()
+            # Extract version number like "126.0.6478.182"
+            installed_chrome_version = re.search(r"(\d+\.\d+\.\d+\.\d+)", installed_chrome_version_output)
+            if not installed_chrome_version:
+                st.error("Could not determine installed Chrome version to match Chromedriver.")
+                raise Exception("Installed Chrome version determination failed.")
+            installed_chrome_version = installed_chrome_version.group(1)
+            
+            # Use Chrome for Testing (CfT) API to find compatible Chromedriver
+            chromedriver_api_url = f"https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+            response = requests.get(chromedriver_api_url)
+            response.raise_for_status()
+            versions_data = response.json()
+            
+            chromedriver_url = None
+            for version_entry in versions_data['versions']:
+                if version_entry['version'] == installed_chrome_version:
+                    for download in version_entry['downloads']['chromedriver']:
+                        if download['platform'] == 'linux64':
+                            chromedriver_url = download['url']
+                            break
+                if chromedriver_url:
+                    break
+            
+            if not chromedriver_url:
+                st.error(f"Could not find a matching Chromedriver for Chrome version {installed_chrome_version}")
+                raise Exception("Matching Chromedriver URL not found.")
+
+            st.info(f"Downloading Chromedriver from {chromedriver_url}...")
+            os.system(f"wget {chromedriver_url} -O /tmp/chromedriver.zip")
+            os.system(f"unzip -o /tmp/chromedriver.zip -d /tmp/chromedriver_extracted")
+            os.system(f"sudo mv /tmp/chromedriver_extracted/chromedriver {CHROMEDRIVER_PATH}")
+            os.system(f"sudo chmod +x {CHROMEDRIVER_PATH}")
+
+            if not os.path.exists(CHROMEDRIVER_PATH):
+                st.error(f"Chromedriver not found at {CHROMEDRIVER_PATH} after installation.")
+                raise Exception("Chromedriver installation failed.")
+            st.success("Chromedriver installed!")
+
+        except Exception as e:
+            st.error(f"Failed to set up Chrome and Chromedriver dynamically: {e}")
+            st.stop() # Stop the app if setup fails
+
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080") # Good practice for headless
-    options.add_argument("--disable-extensions") # Good practice
-    options.add_argument("--proxy-server='direct://'") # Avoid proxy issues
-    options.add_argument("--proxy-bypass-list=*") # Avoid proxy issues
-    options.add_argument("--start-maximized") # Maximize window
-    options.add_argument("--no-zygote") # For some Linux environments
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--proxy-server='direct://'")
+    options.add_argument("--proxy-bypass-list=*")
+    options.add_argument("--start-maximized")
+    options.add_argument("--no-zygote")
 
     try:
-        # These paths are standard for Chromium and Chromedriver when installed via apt-get
-        # on Debian/Ubuntu-based systems (like Streamlit Cloud's environment).
-        options.binary_location = "/usr/bin/chromium-browser"
         driver = webdriver.Chrome(
-            executable_path="/usr/bin/chromedriver",
-            options=options
+            executable_path=CHROMEDRIVER_PATH,
+            options=options,
+            # service_args=["--verbose", "--log-path=/tmp/chromedriver.log"] # Uncomment for debugging
         )
-        st.success("Chromedriver and Chromium initialized successfully!")
+        st.success("Selenium WebDriver initialized successfully!")
     except Exception as e:
         st.error(f"Failed to initialize Chrome driver. Error: {e}")
-        st.error("This often happens on cloud platforms if Chromium or Chromedriver are not correctly installed or linked.")
+        st.error("Ensure Chrome and Chromedriver are correctly installed and compatible.")
         st.exception(e) # Display full exception details in the UI
         st.stop() # Stop the app if the driver fails to initialize
     return driver
+
 
 def extract_profile(driver, user_id, depth):
     url = f"https://scholar.google.com/citations?hl=en&user={user_id}"
@@ -620,12 +701,14 @@ if col1.button("Start/Resume Crawl", disabled=st.session_state.is_crawling):
 
     st.session_state.is_crawling = True
     st.session_state.status_message = "Crawl started..."
-    # st.experimental_rerun() # Trigger a rerun to start the crawl loop
+    # st.experimental_rerun() # Removed by previous instructions
+    st.rerun() # Use st.rerun() if you really need to force a rerun and your Streamlit version supports it
 
 if col2.button("Stop Crawl", disabled=not st.session_state.is_crawling):
     st.session_state.is_crawling = False
     st.session_state.status_message = "Crawl stopping soon..."
-    st.experimental_rerun() # Trigger a rerun to break the crawl loop
+    # st.experimental_rerun() # Removed by previous instructions
+    st.rerun() # Use st.rerun() if you really need to force a rerun and your Streamlit version supports it
 
 if st.sidebar.button("Reset All Data"):
     st.session_state.all_profiles = []
@@ -640,7 +723,7 @@ if st.sidebar.button("Reset All Data"):
     st.session_state.is_crawling = False
     st.session_state.progress_value = 0
     st.session_state.progress_text = "0 profiles scraped."
-    st.experimental_rerun() # Reset and refresh UI
+    st.rerun() # Use st.rerun() if you really need to force a rerun and your Streamlit version supports it
 
 st.sidebar.info(f"Current Status: {st.session_state.status_message}")
 st.sidebar.progress(st.session_state.progress_value, text=st.session_state.progress_text)
@@ -662,7 +745,7 @@ if st.session_state.is_crawling:
         crawl_bfs_resume(driver, max_crawl_depth, max_crawl_seconds)
     # After crawl_bfs_resume returns (either finished or stopped by user/time),
     # ensure UI reflects the final state
-    st.experimental_rerun() # One final rerun to update all components to the finished state
+    st.rerun() # Use st.rerun() if you really need to force a rerun and your Streamlit version supports it
 
 st.header("Raw Data (for debugging)")
 with st.expander("Show Raw Session State"):
