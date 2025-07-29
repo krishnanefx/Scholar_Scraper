@@ -23,46 +23,18 @@ import difflib
 import torch
 from transformers import pipeline
 
-# Import Playwright specific types for clarity
-from playwright.sync_api import sync_playwright, BrowserContext, Page
+# --- Selenium Imports ---
+from selenium import webdriver
+from selenium.webdriver.firefox.service import Service as FirefoxService
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from webdriver_manager.firefox import GeckoDriverManager
 
 # --- Set environment variable for tokenizers (important for Hugging Face models) ---
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-# --- Playwright Installation (Temporary - NOT FOR PRODUCTION) ---
-# This part ensures Playwright browsers are installed.
-# Using session_state to run it only once per deployment/session for efficiency.
-if 'playwright_browsers_installed' not in st.session_state:
-    st.session_state.playwright_browsers_installed = False
-
-if not st.session_state.playwright_browsers_installed:
-    st.info("Attempting to install Playwright browsers. This might take a moment...")
-    try:
-        playwright_cache_dir = os.path.expanduser("~/.cache/ms-playwright")
-        
-        # Check if the cache directory exists and contains some files (implies browsers might be there)
-        # This check is heuristic. A more robust check might involve 'playwright install --dry-run'
-        if not os.path.exists(playwright_cache_dir) or not os.listdir(playwright_cache_dir):
-            command = [sys.executable, "-m", "playwright", "install"]
-            result = subprocess.run(command, capture_output=True, text=True, check=True)
-            
-            st.success("Playwright browsers installed successfully!")
-            st.code(result.stdout)
-            st.session_state.playwright_browsers_installed = True
-            
-        else:
-            st.success("Playwright browsers already appear to be installed.")
-            st.session_state.playwright_browsers_installed = True
-
-    except subprocess.CalledProcessError as e:
-        st.error(f"Failed to install Playwright browsers. Error: {e.stderr}")
-        st.code(e.stdout)
-        st.code(e.stderr)
-        st.stop()
-    except Exception as e:
-        st.error(f"An unexpected error occurred during Playwright browser installation: {e}")
-        st.stop()
-# --- End Playwright Installation Block ---
 
 # --- Global Constants and Initializations ---
 
@@ -107,12 +79,11 @@ non_research_labels = [
 candidate_labels = researcher_labels + non_research_labels
 
 # Define all expected columns for the DataFrame to ensure consistency
-# Initializing default values for new columns that might be added during processing
 EXPECTED_COLUMNS = [
     "user_id", "name", "position", "email", "country", "institution", "research_interests",
     "interest_phrases", "citations_all", "h_index_all", "topic_clusters", "search_depth",
-    "Participated_in_ICLR", "ICLR_Matched_Name", "ICLR_Institution", # Added ICLR_Institution here
-    "Participated_in_NeurIPS", "NeurIPS_Matched_Name", "NeurIPS_Institution", # Added NeurIPS_Institution here
+    "Participated_in_ICLR", "ICLR_Matched_Name", "ICLR_Institution",
+    "Participated_in_NeurIPS", "NeurIPS_Matched_Name", "NeurIPS_Institution",
     "wiki_birth_name", "wiki_name", "wiki_birth_date", "wiki_birth_place",
     "wiki_death_date", "wiki_death_place", "wiki_fields", "wiki_work_institution",
     "wiki_alma_mater", "wiki_notable_students", "wiki_thesis_title", "wiki_thesis_year",
@@ -120,7 +91,6 @@ EXPECTED_COLUMNS = [
     "wiki_wiki_summary", "wiki_is_researcher_ml", "wiki_matched_title",
     "coauthors", "Fuzzy_Matched"
 ]
-
 
 # === Mappings ===
 domain_to_institution = {
@@ -345,42 +315,76 @@ def normalize_interest_phrases(raw_text):
             if interest == phrase:
                 interest = phrase.replace(" ", "_")
                 found_multi_word = True
-                break
+            break
         processed.append(interest)
     return processed
 
-# --- Playwright Browser Management ---
-@st.cache_resource(show_spinner="Initializing Playwright Browser...")
-def get_browser():
-    # This initializes Playwright and launches a browser.
-    # st.cache_resource ensures it's only done once per session.
-    pw = sync_playwright().start()
-    # Use headless=True for production, False for debugging
-    browser = pw.chromium.launch(headless=True)
-    return browser
+# --- Selenium WebDriver Setup ---
+@st.cache_resource(show_spinner="Initializing Selenium WebDriver...")
+def get_selenium_driver():
+    firefox_options = FirefoxOptions()
+    firefox_options.add_argument("--headless")
+    firefox_options.add_argument("--no-sandbox") # Recommended for Docker/Linux environments
+    firefox_options.add_argument("--disable-dev-shm-usage") # Recommended for Docker/Linux environments
 
-# --- Scraping Functions (Adapted for Playwright) ---
-def extract_profile_playwright(page: Page, user_id: str, depth: int) -> dict:
+    # Ensure geckodriver is downloaded and available
+    try:
+        service = FirefoxService(GeckoDriverManager().install())
+        driver = webdriver.Firefox(options=firefox_options, service=service)
+        return driver
+    except WebDriverException as e:
+        st.error(f"Failed to initialize Firefox WebDriver: {e}")
+        st.stop()
+    except Exception as e:
+        st.error(f"An unexpected error occurred during WebDriver setup: {e}")
+        st.stop()
+
+
+# --- Scraping Functions (Adapted for Selenium) ---
+def extract_profile_selenium(driver: webdriver.Firefox, user_id: str, depth: int) -> dict:
     url = f"https://scholar.google.com/citations?hl=en&user={user_id}"
-    page.goto(url, wait_until="domcontentloaded")
+    TIMEOUT = 20 # Timeout for element loading
+
+    driver.get(url)
     time.sleep(random.uniform(1.5, 3.0)) # Simulate human-like delay
 
-    # Use Playwright's page.locator for robust element finding
-    # Name has a unique ID, so it's usually safe
-    name_elem = page.locator("#gsc_prf_in")
-    name = name_elem.text_content().strip() if name_elem.count() > 0 else "Unknown"
+    # Use WebDriverWait for robustness
+    try:
+        name_elem = WebDriverWait(driver, TIMEOUT).until(
+            EC.presence_of_element_located((By.ID, "gsc_prf_in"))
+        )
+        name = name_elem.text.strip()
+    except TimeoutException:
+        name = "Unknown"
+        st.warning(f"Could not find name for {user_id}")
 
-    # Position: Often the first .gsc_prf_il that is NOT #gsc_prf_ivh AND NOT #gsc_prf_int
-    position_elem = page.locator(".gsc_prf_il:not(#gsc_prf_ivh):not(#gsc_prf_int)").first
-    position = position_elem.text_content().strip() if position_elem.count() > 0 else "Unknown"
+    try:
+        # Position: Find elements by class name and filter using Python logic
+        position_elements = driver.find_elements(By.CLASS_NAME, "gsc_prf_il")
+        position = "Unknown"
+        for elem in position_elements:
+            # Check if the element's ID is not 'gsc_prf_ivh' (email) or 'gsc_prf_int' (interests)
+            if elem.get_attribute('id') not in ['gsc_prf_ivh', 'gsc_prf_int']:
+                position = elem.text.strip()
+                if position: # Take the first non-empty one
+                    break
+    except Exception:
+        position = "Unknown"
+        st.warning(f"Could not find position for {user_id}")
 
-    # Email has a specific ID: #gsc_prf_ivh
-    email_elem = page.locator("#gsc_prf_ivh")
-    email = email_elem.text_content().strip() if email_elem.count() > 0 else "Unknown"
+    try:
+        email_elem = driver.find_element(By.ID, "gsc_prf_ivh")
+        email = email_elem.text.strip()
+    except Exception:
+        email = "Unknown"
+        st.warning(f"Could not find email for {user_id}")
 
-    # Interests has a specific ID: #gsc_prf_int
-    interests_elems = page.locator("#gsc_prf_int a") # Your original interests_elems was correct here
-    interests_raw = ", ".join(interests_elems.all_text_contents()) if interests_elems.count() > 0 else ""
+    interests_raw = ""
+    try:
+        interests_elems = driver.find_elements(By.CSS_SELECTOR, "#gsc_prf_int a")
+        interests_raw = ", ".join([elem.text.strip() for elem in interests_elems])
+    except Exception:
+        st.warning(f"Could not find interests for {user_id}")
     
     interest_phrases = normalize_interest_phrases(interests_raw)
 
@@ -390,23 +394,25 @@ def extract_profile_playwright(page: Page, user_id: str, depth: int) -> dict:
     citations_all = "0"
     h_index_all = "0"
     
-    # Use Playwright for metrics
-    metrics_rows = page.locator("#gsc_rsb_st tbody tr")
-    if metrics_rows.count() >= 2:
-        try:
-            citations_all = metrics_rows.nth(0).locator("td").nth(1).text_content().strip()
-            h_index_all = metrics_rows.nth(1).locator("td").nth(1).text_content().strip()
-        except Exception:
-            pass # Keep default "0"
+    try:
+        # Metrics: locate the table rows and cells
+        metrics_rows = driver.find_elements(By.CSS_SELECTOR, "#gsc_rsb_st tbody tr")
+        if len(metrics_rows) >= 2:
+            citations_all = metrics_rows[0].find_elements(By.TAG_NAME, "td")[1].text.strip()
+            h_index_all = metrics_rows[1].find_elements(By.TAG_NAME, "td")[1].text.strip()
+    except Exception:
+        st.warning(f"Could not find citation metrics for {user_id}")
 
-    # Get coauthors using Playwright
     coauthors = []
-    coauthor_links = page.locator(".gsc_rsb_aa .gsc_rsb_a_desc a")
-    for i in range(coauthor_links.count()):
-        href = coauthor_links.nth(i).get_attribute("href")
-        if href and "user=" in href:
-            co_id = href.split("user=")[1].split("&")[0]
-            coauthors.append(co_id)
+    try:
+        coauthor_links = driver.find_elements(By.CSS_SELECTOR, ".gsc_rsb_aa .gsc_rsb_a_desc a")
+        for link in coauthor_links:
+            href = link.get_attribute("href")
+            if href and "user=" in href:
+                co_id = href.split("user=")[1].split("&")[0]
+                coauthors.append(co_id)
+    except Exception:
+        st.warning(f"Could not find coauthors for {user_id}")
 
     profile = {
         "user_id": user_id,
@@ -483,18 +489,14 @@ if 'fuzzy_cache' not in st.session_state:
 def save_progress_to_disk():
     # Save profiles DataFrame
     if st.session_state.all_profiles:
-        # Ensure all profiles have all EXPECTED_COLUMNS, filling missing with default empty values
-        # This prevents issues when creating DataFrame from heterogenous dictionaries
         normalized_profiles = []
         for profile in st.session_state.all_profiles:
             normalized_profile = {col: profile.get(col, "") for col in EXPECTED_COLUMNS}
-            # Handle list/set conversion to string for saving
             for list_col in ["interest_phrases", "topic_clusters", "coauthors"]:
                 if isinstance(normalized_profile.get(list_col), (list, set)):
                     normalized_profile[list_col] = str(list(normalized_profile[list_col]))
                 elif normalized_profile.get(list_col) is None:
                     normalized_profile[list_col] = "[]"
-            # Ensure boolean values are saved as readable strings
             for bool_col in ["wiki_deceased", "wiki_is_researcher_ml", "Participated_in_ICLR", "Participated_in_NeurIPS", "Fuzzy_Matched"]:
                 if isinstance(normalized_profile.get(bool_col), bool):
                     normalized_profile[bool_col] = str(normalized_profile[bool_col])
@@ -503,61 +505,53 @@ def save_progress_to_disk():
 
             normalized_profiles.append(normalized_profile)
 
-        df = pd.DataFrame(normalized_profiles, columns=EXPECTED_COLUMNS) # Specify columns to ensure order
-        df.to_csv("scholar_profiles.csv", index=False) # Use a simple name for persistence
+        df = pd.DataFrame(normalized_profiles, columns=EXPECTED_COLUMNS)
+        df.to_csv("scholar_profiles.csv", index=False)
         st.info(f"💾 Progress saved: {len(st.session_state.all_profiles)} profiles to scholar_profiles.csv")
     
-    # Save queue
     with open("queue.txt", "w") as f:
         for item in st.session_state.crawl_queue:
             f.write(json.dumps(item) + "\n")
     st.info("💾 Queue saved to queue.txt")
 
-    # Save graph
-    if st.session_state.coauthor_graph.nodes: # Only save if graph is not empty
+    if st.session_state.coauthor_graph.nodes:
         nx.write_graphml(st.session_state.coauthor_graph, "coauthor_network.graphml")
-        st.info("💾 Co-author network saved to coauthor_network.graphml")
+    st.info("💾 Co-author network saved to coauthor_network.graphml")
     
-    # Save fuzzy cache
     with open("fuzzy_match_cache.json", "w") as f:
         json.dump(st.session_state.fuzzy_cache, f, indent=2)
     st.info("💾 Fuzzy match cache saved to fuzzy_match_cache.json")
 
 
 def load_previous_state():
-    # Load profiles
     if os.path.exists("scholar_profiles.csv"):
         try:
             profiles_df = pd.read_csv("scholar_profiles.csv")
             loaded_profiles = profiles_df.to_dict(orient="records")
-            st.session_state.all_profiles = [] # Reset to populate correctly
-            st.session_state.visited_ids = set() # Reset visited IDs as well
+            st.session_state.all_profiles = []
+            st.session_state.visited_ids = set()
 
             for p in loaded_profiles:
-                # Ensure fields are correctly parsed, especially lists/dicts stored as strings
                 for col in ["interest_phrases", "topic_clusters", "coauthors"]:
                     if isinstance(p.get(col), str):
                         try:
                             p[col] = eval(p[col]) if p[col].startswith('[') else [item.strip() for item in p[col].split(',') if item.strip()]
                         except:
-                            p[col] = [] # Fallback to empty list on error
-                    elif p.get(col) is None: # Handle None values for lists
+                            p[col] = []
+                    elif p.get(col) is None:
                         p[col] = []
                 
-                # Ensure search_depth is integer
                 try:
                     p["search_depth"] = int(float(p.get("search_depth", 0)))
                 except (ValueError, TypeError):
                     p["search_depth"] = 0
                 
-                # Convert boolean strings back to actual booleans
                 for bool_col in ["wiki_deceased", "wiki_is_researcher_ml", "Participated_in_ICLR", "Participated_in_NeurIPS", "Fuzzy_Matched"]:
                     if isinstance(p.get(bool_col), str):
                         p[bool_col] = p[bool_col].lower() == 'true'
                     elif p.get(bool_col) is None:
                         p[bool_col] = False
 
-                # Ensure all EXPECTED_COLUMNS are present after loading
                 for col in EXPECTED_COLUMNS:
                     if col not in p:
                         p[col] = "" if "institution" in col.lower() or "name" in col.lower() or "summary" in col.lower() or "title" in col.lower() else False if "participated" in col.lower() or "researcher" in col.lower() or "deceased" in col.lower() else [] if "interest" in col.lower() or "coauthor" in col.lower() or "cluster" in col.lower() else "0" if "index" in col.lower() or "citations" in col.lower() else ""
@@ -571,7 +565,6 @@ def load_previous_state():
             st.session_state.all_profiles = []
             st.session_state.visited_ids = set()
 
-    # Load graph
     if os.path.exists("coauthor_network.graphml"):
         try:
             st.session_state.coauthor_graph = nx.read_graphml("coauthor_network.graphml")
@@ -580,7 +573,6 @@ def load_previous_state():
             st.warning(f"⚠️ Error loading graphml file: {e}. Graph file appears corrupted, starting fresh graph.")
             st.session_state.coauthor_graph = nx.Graph()
 
-    # Load queue
     if os.path.exists("queue.txt"):
         try:
             with open("queue.txt", "r") as f:
@@ -589,19 +581,17 @@ def load_previous_state():
             for line in lines:
                 try:
                     data = json.loads(line)
-                    # Ensure the tuple is (user_id, depth, parent_id)
                     if isinstance(data, list) and len(data) >= 2:
                         st.session_state.crawl_queue.append((data[0], int(data[1]), data[2] if len(data) > 2 else None))
-                    else: # Fallback for old/malformed formats
+                    else:
                         st.session_state.crawl_queue.append((str(data), 0, None))
                 except json.JSONDecodeError:
-                    st.session_state.crawl_queue.append((line, 0, None)) # Fallback for old format (just ID)
+                    st.session_state.crawl_queue.append((line, 0, None))
             st.success(f"✅ Loaded {len(st.session_state.crawl_queue)} items into the queue from queue.txt.")
         except Exception as e:
             st.warning(f"⚠️ Error loading queue file: {e}. Starting with empty queue.")
             st.session_state.crawl_queue = deque()
 
-    # Load fuzzy cache
     if os.path.exists("fuzzy_match_cache.json"):
         try:
             with open("fuzzy_match_cache.json", "r") as f:
@@ -612,14 +602,12 @@ def load_previous_state():
             st.session_state.fuzzy_cache = {}
 
 def enqueue_user(user_id, depth, parent_id=None, prepend=False):
-    # Ensure user_id is a string, depth is an int
     user_id = str(user_id)
     depth = int(depth)
 
     if user_id in st.session_state.visited_ids:
         return
     
-    # Check if already in queue to avoid duplicates by user_id
     if any(item[0] == user_id for item in st.session_state.crawl_queue):
         return
 
@@ -630,19 +618,13 @@ def enqueue_user(user_id, depth, parent_id=None, prepend=False):
         st.session_state.crawl_queue.append(new_item)
 
 def increment_edge_weight(a, b):
-    # This now operates on the session_state graph
     if st.session_state.coauthor_graph.has_edge(a, b):
         st.session_state.coauthor_graph[a][b]["weight"] += 1
     else:
         st.session_state.coauthor_graph.add_edge(a, b, weight=1)
 
 def fuzzy_match_conference_participation(profile: dict, conf_name: str, df: pd.DataFrame, name_col='Author', inst_col='Institution', threshold=85):
-    """
-    Fuzzy matches a profile's name against a conference DataFrame.
-    Updates the profile dictionary directly and uses/updates the fuzzy_cache.
-    """
     if df is None:
-        # st.warning(f"[{conf_name}] Conference data not loaded for fuzzy matching.") # Avoid spamming logs
         return
     
     profile_name = profile.get("name", "").lower()
@@ -652,7 +634,6 @@ def fuzzy_match_conference_participation(profile: dict, conf_name: str, df: pd.D
         profile[f"{conf_name}_Institution"] = ""
         return
 
-    # Check cache first
     cache_key = f"{conf_name}:{profile_name}"
     if cache_key in st.session_state.fuzzy_cache:
         matched_info = st.session_state.fuzzy_cache[cache_key]
@@ -663,14 +644,10 @@ def fuzzy_match_conference_participation(profile: dict, conf_name: str, df: pd.D
 
     authors = df[name_col].dropna().unique()
     
-    # Process authors for fuzzy matching
-    # Create a list of (lower_case_author, original_author, original_institution)
     authors_for_matching = []
     for author_orig in authors:
         inst_orig = ""
         if inst_col in df.columns:
-            # Find the institution associated with this specific author entry
-            # Assuming one institution per author in the conference data for simplicity
             inst_data = df[df[name_col] == author_orig][inst_col].dropna()
             if not inst_data.empty:
                 inst_orig = inst_data.iloc[0]
@@ -683,13 +660,11 @@ def fuzzy_match_conference_participation(profile: dict, conf_name: str, df: pd.D
         st.session_state.fuzzy_cache[cache_key] = {"participated": False, "matched_name": "", "institution": ""}
         return
 
-    # Perform fuzzy match on lowercased names
     best_match_tuple = process.extractOne(profile_name, [a[0] for a in authors_for_matching], scorer=fuzz.token_sort_ratio)
     
     if best_match_tuple and best_match_tuple[1] >= threshold:
         matched_lower_name, score = best_match_tuple
         
-        # Find the original author and institution from our prepared list
         original_matched_author = ""
         original_matched_institution = ""
         for lower_name, orig_name, orig_inst in authors_for_matching:
@@ -718,48 +693,41 @@ def run_fuzzy_matching_for_all_profiles():
 
     newly_matched_count = 0
     with st.spinner("Running fuzzy matching for conference participation..."):
-        # Iterate over a copy to avoid issues if all_profiles is modified during iteration (though unlikely here)
-        for profile in st.session_state.all_profiles: # Iterate directly, as modifications are in-place
-            # Ensure 'Fuzzy_Matched' key exists and is boolean
+        for profile in st.session_state.all_profiles:
             if "Fuzzy_Matched" not in profile:
                 profile["Fuzzy_Matched"] = False
-            elif isinstance(profile["Fuzzy_Matched"], str): # Convert from string if loaded from CSV
+            elif isinstance(profile["Fuzzy_Matched"], str):
                 profile["Fuzzy_Matched"] = profile["Fuzzy_Matched"].lower() == 'true'
 
             if not profile["Fuzzy_Matched"]:
                 fuzzy_match_conference_participation(profile, "ICLR", st.session_state.iclr_df, name_col='Author', inst_col='Institution')
                 fuzzy_match_conference_participation(profile, "NeurIPS", st.session_state.neurips_df, name_col='Author', inst_col='Institution')
-                profile["Fuzzy_Matched"] = True # Mark as fuzzy-matched
+                profile["Fuzzy_Matched"] = True
                 newly_matched_count += 1
         st.success(f"Fuzzy matching completed. Processed {newly_matched_count} new profiles for fuzzy matching.")
-        # Save cache after fuzzy matching all pending profiles
-        save_progress_to_disk() # This includes saving fuzzy_match_cache.json
+        save_progress_to_disk()
 
 
 # --- Main Crawling Function (Streamlit-aware) ---
-def crawl_bfs_resume_streamlit(browser: BrowserContext, seed_user_ids_input: str, max_crawl_depth: int, max_crawl_seconds: int, save_every: int, fuzzy_run_interval: int, status_placeholder, progress_bar):
+def crawl_bfs_resume_streamlit(driver: webdriver.Firefox, seed_user_ids_input: str, max_crawl_depth: int, max_crawl_seconds: int, save_every: int, fuzzy_run_interval: int, status_placeholder, progress_bar):
     st.session_state.is_crawling = True
     st.session_state.start_time = time.time()
-    st.session_state.crawled_count = 0
+    st.session_state.crawled_count = 0 # This count is for the current session's crawl
     profiles_crawled_this_run = 0
-    fuzzy_match_counter = 0
 
-    # --- Initial Queue Population ---
     if seed_user_ids_input:
         new_seeds = [id.strip() for id in seed_user_ids_input.split(',') if id.strip()]
         for seed_id in new_seeds:
-            # Check if seed_id is already in visited_ids or crawl_queue before adding
             if seed_id not in st.session_state.visited_ids and not any(item[0] == seed_id for item in st.session_state.crawl_queue):
-                enqueue_user(seed_id, 0) # Add with depth 0
+                enqueue_user(seed_id, 0)
                 status_placeholder.info(f"Added initial seed ID to queue: {seed_id}")
     
     if not st.session_state.crawl_queue:
         status_placeholder.error("Queue is empty and no new seed IDs were provided. Cannot start crawl.")
         st.session_state.is_crawling = False
-        st.rerun() # Rerun to update UI status
+        st.rerun()
         return
 
-    # Main crawling loop
     while st.session_state.crawl_queue and st.session_state.is_crawling:
         elapsed_time = time.time() - st.session_state.start_time
         if elapsed_time > max_crawl_seconds:
@@ -768,11 +736,11 @@ def crawl_bfs_resume_streamlit(browser: BrowserContext, seed_user_ids_input: str
             break
         
         user_id, depth, parent_id = st.session_state.crawl_queue.popleft()
-        depth = int(depth) # Ensure depth is an integer
+        depth = int(depth)
 
         if user_id in st.session_state.visited_ids:
             continue
-        if max_crawl_depth > 0 and depth >= max_crawl_depth: # Changed to >= as depth starts from 0
+        if max_crawl_depth > 0 and depth >= max_crawl_depth:
             status_placeholder.info(f"Skipping {user_id}: Depth {depth} exceeds max_crawl_depth {max_crawl_depth}.")
             continue
 
@@ -780,18 +748,11 @@ def crawl_bfs_resume_streamlit(browser: BrowserContext, seed_user_ids_input: str
         profiles_crawled_this_run += 1
         current_status_text = f"🔎 Crawling {user_id} at depth {depth} | Queue: {len(st.session_state.crawl_queue)} | Scraped total: {st.session_state.crawled_count}"
         status_placeholder.info(current_status_text)
-        # Progress bar based on current crawl count (can be total or per-session)
+        # Update progress bar: (Current crawled profiles / (Total profiles already scraped + profiles in queue + 1 for current))
         progress_bar.progress(min(1.0, st.session_state.crawled_count / (len(st.session_state.visited_ids) + len(st.session_state.crawl_queue) + 1)), text=current_status_text)
 
         try:
-            # Create a new browser context for each profile to isolate sessions
-            context = browser.new_context()
-            page = context.new_page() 
-            
-            profile = extract_profile_playwright(page, user_id, depth)
-            
-            page.close() # Close page after use
-            context.close() # Close context as well
+            profile = extract_profile_selenium(driver, user_id, depth)
             
             st.session_state.visited_ids.add(user_id)
             
@@ -812,10 +773,9 @@ def crawl_bfs_resume_streamlit(browser: BrowserContext, seed_user_ids_input: str
 
             # Add co-author relationships to the graph
             for co_id in profile.get("coauthors", []):
-                if co_id != user_id: # Avoid self-loops
+                if co_id != user_id:
                     increment_edge_weight(user_id, co_id)
-                    # Enqueue co-authors for further crawling if within depth limit
-                    if depth + 1 <= max_crawl_depth: # Ensure co-authors don't exceed max depth
+                    if depth + 1 <= max_crawl_depth:
                         enqueue_user(co_id, depth + 1, parent_id=user_id)
 
             st.session_state.all_profiles.append(profile)
@@ -824,22 +784,20 @@ def crawl_bfs_resume_streamlit(browser: BrowserContext, seed_user_ids_input: str
             if profiles_crawled_this_run % save_every == 0:
                 save_progress_to_disk()
             
-            # Run fuzzy matching periodically
             if profiles_crawled_this_run % fuzzy_run_interval == 0:
                 run_fuzzy_matching_for_all_profiles()
 
         except Exception as e:
             status_placeholder.error(f"❌ Error crawling {user_id}: {e}")
-            # Consider requeueing or logging the failed ID for retry
-            # For now, just skip and move on
+            # Consider more sophisticated error handling, like re-queueing or a dead-letter queue.
             
         time.sleep(random.uniform(0.5, 2.0)) # Politeness delay between profiles
 
     st.session_state.is_crawling = False
-    save_progress_to_disk() # Final save
-    run_fuzzy_matching_for_all_profiles() # Final fuzzy match
+    save_progress_to_disk()
+    run_fuzzy_matching_for_all_profiles()
     status_placeholder.success("✅ Crawl finished (or stopped).")
-    st.rerun() # Rerun to update UI after crawl stops
+    st.rerun()
 
 # --- Streamlit UI Layout ---
 st.set_page_config(layout="wide", page_title="Scholar Profile Crawler", page_icon="🔍")
@@ -850,6 +808,8 @@ st.markdown("""
 This application allows you to crawl Google Scholar profiles and extract public information,
 including co-authors, research interests, and integrate with Wikipedia data.
 """)
+
+st.markdown("---")
 
 ### Configuration
 col1, col2, col3 = st.columns(3)
@@ -898,6 +858,7 @@ if neurips_file:
     except Exception as e:
         st.error(f"Error loading NeurIPS CSV: {e}")
 
+st.markdown("---")
 
 ### Control Panel
 status_placeholder = st.empty()
@@ -913,34 +874,40 @@ if col_buttons1.button("Start Crawl", type="primary", disabled=st.session_state.
         status_placeholder.info("Starting crawl...")
         with st.spinner("Crawling in progress..."):
             try:
-                browser = get_browser() # Get cached browser instance
-                crawl_bfs_resume_streamlit(
-                    browser,
-                    seed_user_ids_input,
-                    max_crawl_depth,
-                    max_crawl_seconds,
-                    save_every,
-                    fuzzy_run_interval,
-                    status_placeholder,
-                    progress_bar
-                )
+                # Get the cached Selenium driver instance
+                driver = get_selenium_driver()
+                if driver: # Ensure driver was successfully initialized
+                    crawl_bfs_resume_streamlit(
+                        driver,
+                        seed_user_ids_input,
+                        max_crawl_depth,
+                        max_crawl_seconds,
+                        save_every,
+                        fuzzy_run_interval,
+                        status_placeholder,
+                        progress_bar
+                    )
+                else:
+                    status_placeholder.error("Selenium WebDriver failed to initialize. Cannot start crawl.")
             except Exception as e:
-                status_placeholder.error(f"An error occurred during crawl: {e}")
+                status_placeholder.error(f"An unexpected error occurred during crawl: {e}")
                 st.session_state.is_crawling = False
-                st.rerun() # Rerun to update button state
+                st.rerun()
 
 if col_buttons2.button("Stop Crawl", disabled=not st.session_state.is_crawling):
     st.session_state.is_crawling = False
     status_placeholder.warning("Crawl stopping... Please wait for current operation to complete.")
-    st.rerun() # Trigger a rerun to allow the loop to break
+    st.rerun()
 
 if col_buttons3.button("Load Previous State", disabled=st.session_state.is_crawling):
     load_previous_state()
-    st.rerun() # Rerun to update display with loaded data
+    st.rerun()
 
 if st.button("Run Fuzzy Matching on Loaded Data"):
     run_fuzzy_matching_for_all_profiles()
-    st.rerun() # Rerun to refresh the data display
+    st.rerun()
+
+st.markdown("---")
 
 ### Current State
 st.subheader("Crawling Statistics")
@@ -953,12 +920,9 @@ if st.session_state.start_time:
     current_elapsed_time = time.time() - st.session_state.start_time
     st.write(f"**Elapsed Crawl Time:** {int(current_elapsed_time)} seconds")
 
-
-# Filter and display data
 st.subheader("Scraped Profiles")
 
 if st.session_state.all_profiles:
-    # Ensure all columns are present before creating DataFrame for consistent display
     display_profiles = []
     for profile in st.session_state.all_profiles:
         temp_profile = {col: profile.get(col, None) for col in EXPECTED_COLUMNS}
@@ -966,7 +930,6 @@ if st.session_state.all_profiles:
 
     df_display = pd.DataFrame(display_profiles)
     
-    # Optionally, convert list-like columns for better display
     for col in ["interest_phrases", "topic_clusters", "coauthors"]:
         if col in df_display.columns:
             df_display[col] = df_display[col].apply(lambda x: ", ".join(x) if isinstance(x, (list, set)) else x)
@@ -988,7 +951,6 @@ if st.session_state.coauthor_graph.nodes:
     st.write(f"**Number of nodes:** {st.session_state.coauthor_graph.number_of_nodes()}")
     st.write(f"**Number of edges:** {st.session_state.coauthor_graph.number_of_edges()}")
     
-    # Display top 10 co-author relationships by weight
     if st.session_state.coauthor_graph.edges:
         edges_with_weights = []
         for u, v, data in st.session_state.coauthor_graph.edges(data=True):
