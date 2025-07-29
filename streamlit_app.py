@@ -758,7 +758,7 @@ def crawl_bfs_resume_streamlit(browser_page, seed_user_id, max_crawl_depth, max_
     save_progress_to_disk() # Final save
     status_placeholder.success(f"✅ Crawl finished. Total new profiles scraped in this run: {new_profiles_this_run}. Total profiles in data: {len(st.session_state.all_profiles)}.")
     st.session_state.crawl_status_message = f"✅ Crawl finished. {new_profiles_this_run} new profiles scraped."
-    st.experimental_rerun() # Rerun to update final status
+    st.rerun() # Rerun to update final status
 
 
 # --- Streamlit UI Layout ---
@@ -870,7 +870,7 @@ with col_actions_1:
                 progress_bar
             )
             # st.session_state.is_crawling will be False after crawl_bfs_resume_streamlit returns
-            st.experimental_rerun() # Rerun to update UI after crawl finishes/stops
+            st.rerun() # Rerun to update UI after crawl finishes/stops
 
 with col_actions_2:
     if st.button("⏹️ Stop Crawl", disabled=not st.session_state.is_crawling):
