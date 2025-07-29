@@ -366,17 +366,42 @@ def extract_profile_playwright(page, user_id, depth):
     time.sleep(random.uniform(1.5, 3.0)) # Simulate human-like delay
 
     # Use Playwright's page.locator for robust element finding
+    # Name has a unique ID, so it's usually safe
     name_elem = page.locator("#gsc_prf_in")
     name = name_elem.text_content().strip() if name_elem.count() > 0 else "Unknown"
 
-    position_elem = page.locator(".gsc_prf_il")
+    # --- FIX START ---
+
+    # Original problem: ".gsc_prf_il" is too general.
+    # The 'position' element is typically the first or second div with that class
+    # and *doesn't* have an 'id'.
+
+    # Strategy 1: Target the specific parent or sibling relationship.
+    # On Google Scholar, the position usually comes right after the name and doesn't have an ID
+    # while the email and interests DO have IDs.
+    
+    # Try to find the .gsc_prf_il that is *not* the email or interests
+    # Or more directly, the first .gsc_prf_il after #gsc_prf_in that doesn't have an ID
+    # A robust way is to use XPath or a more specific CSS selector.
+    
+    # Let's target the element after #gsc_prf_in that is *not* #gsc_prf_ivh or #gsc_prf_int
+    # Or, given the structure, often the first `gsc_prf_il` *without* an ID is the position.
+    
+    # Method 1: Use specific IDs where available, and be smart for others
+    # Position: Often the first .gsc_prf_il that is NOT #gsc_prf_ivh AND NOT #gsc_prf_int
+    position_elem = page.locator(".gsc_prf_il:not(#gsc_prf_ivh):not(#gsc_prf_int)").first
     position = position_elem.text_content().strip() if position_elem.count() > 0 else "Unknown"
 
+    # Email has a specific ID: #gsc_prf_ivh
     email_elem = page.locator("#gsc_prf_ivh")
     email = email_elem.text_content().strip() if email_elem.count() > 0 else "Unknown"
 
-    interests_elems = page.locator("#gsc_prf_int a")
+    # Interests has a specific ID: #gsc_prf_int
+    interests_elems = page.locator("#gsc_prf_int a") # Your original interests_elems was correct here
     interests_raw = ", ".join(interests_elems.all_text_contents()) if interests_elems.count() > 0 else ""
+    
+    # --- FIX END ---
+
     interest_phrases = normalize_interest_phrases(interests_raw)
 
     country = infer_country_from_email_field(email)
