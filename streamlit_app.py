@@ -102,13 +102,6 @@ non_research_labels = [
 
 candidate_labels = researcher_labels + non_research_labels
 
-# === CONFIG ===
-# These will be configurable via Streamlit UI
-# PROGRESS_CSV = "scholar_profiles_progressssss.csv" # Managed by session state/disk
-# GRAPH_GRAPHML = "coauthor_network_progressssss.graphml" # Managed by session state/disk
-# QUEUE_FILE = "queue.txt" # Managed by session state/disk
-# FUZZY_CACHE_PATH = "fuzzy_match_cache.json" # Managed by session state/disk
-
 EXPECTED_COLUMNS = [
     "user_id", "name", "position", "email", "country", "institution", "research_interests",
     "interest_phrases", "citations_all", "h_index_all", "topic_clusters", "search_depth",
@@ -370,24 +363,6 @@ def extract_profile_playwright(page, user_id, depth):
     name_elem = page.locator("#gsc_prf_in")
     name = name_elem.text_content().strip() if name_elem.count() > 0 else "Unknown"
 
-    # --- FIX START ---
-
-    # Original problem: ".gsc_prf_il" is too general.
-    # The 'position' element is typically the first or second div with that class
-    # and *doesn't* have an 'id'.
-
-    # Strategy 1: Target the specific parent or sibling relationship.
-    # On Google Scholar, the position usually comes right after the name and doesn't have an ID
-    # while the email and interests DO have IDs.
-    
-    # Try to find the .gsc_prf_il that is *not* the email or interests
-    # Or more directly, the first .gsc_prf_il after #gsc_prf_in that doesn't have an ID
-    # A robust way is to use XPath or a more specific CSS selector.
-    
-    # Let's target the element after #gsc_prf_in that is *not* #gsc_prf_ivh or #gsc_prf_int
-    # Or, given the structure, often the first `gsc_prf_il` *without* an ID is the position.
-    
-    # Method 1: Use specific IDs where available, and be smart for others
     # Position: Often the first .gsc_prf_il that is NOT #gsc_prf_ivh AND NOT #gsc_prf_int
     position_elem = page.locator(".gsc_prf_il:not(#gsc_prf_ivh):not(#gsc_prf_int)").first
     position = position_elem.text_content().strip() if position_elem.count() > 0 else "Unknown"
@@ -400,8 +375,6 @@ def extract_profile_playwright(page, user_id, depth):
     interests_elems = page.locator("#gsc_prf_int a") # Your original interests_elems was correct here
     interests_raw = ", ".join(interests_elems.all_text_contents()) if interests_elems.count() > 0 else ""
     
-    # --- FIX END ---
-
     interest_phrases = normalize_interest_phrases(interests_raw)
 
     country = infer_country_from_email_field(email)
@@ -527,9 +500,13 @@ def load_previous_state():
                 for col in ["interest_phrases", "topic_clusters", "coauthors"]:
                     if isinstance(p.get(col), str):
                         try:
-                            p[col] = eval(p[col]) if p[col].startswith('[') else p[col].split(', ') # Handle lists
+                            # Safely evaluate string representations of lists
+                            p[col] = eval(p[col]) if p[col].startswith('[') else [item.strip() for item in p[col].split(',') if item.strip()]
                         except:
-                            p[col] = []
+                            p[col] = [] # Fallback to empty list on error
+                    elif p.get(col) is None: # Handle None values for lists
+                        p[col] = []
+                # Ensure search_depth is integer
                 try:
                     p["search_depth"] = int(float(p.get("search_depth", 0)))
                 except (ValueError, TypeError):
@@ -559,9 +536,13 @@ def load_previous_state():
             for line in lines:
                 try:
                     data = json.loads(line)
-                    st.session_state.crawl_queue.append(tuple(data))
+                    # Ensure the tuple is (user_id, depth, parent_id)
+                    if isinstance(data, list) and len(data) >= 2:
+                        st.session_state.crawl_queue.append((data[0], int(data[1]), data[2] if len(data) > 2 else None))
+                    else: # Fallback for old/malformed formats
+                        st.session_state.crawl_queue.append((str(data), 0, None))
                 except json.JSONDecodeError:
-                    st.session_state.crawl_queue.append((line, 0, None)) # Fallback for old format
+                    st.session_state.crawl_queue.append((line, 0, None)) # Fallback for old format (just ID)
             st.success(f"✅ Loaded {len(st.session_state.crawl_queue)} items into the queue from queue.txt.")
         except Exception as e:
             st.warning(f"⚠️ Error loading queue file: {e}. Starting with empty queue.")
@@ -578,10 +559,18 @@ def load_previous_state():
             st.session_state.fuzzy_cache = {}
 
 def enqueue_user(user_id, depth, parent_id=None, prepend=False):
+    # Ensure user_id is a string, depth is an int
+    user_id = str(user_id)
+    depth = int(depth)
+
     if user_id in st.session_state.visited_ids:
         return
+    
+    # Check if already in queue to avoid duplicates
+    # This might be slow for very large queues, consider a set for faster lookup if performance becomes an issue
     if any(user_id == item[0] for item in st.session_state.crawl_queue):
         return
+
     new_item = (user_id, depth, parent_id)
     if prepend:
         st.session_state.crawl_queue.appendleft(new_item)
@@ -642,8 +631,9 @@ def run_fuzzy_matching_for_all_profiles():
 
     newly_matched_count = 0
     with st.spinner("Running fuzzy matching for conference participation..."):
-        for profile in st.session_state.all_profiles:
-            # Add a 'Fuzzy_Matched' key to each profile if it doesn't exist
+        # Iterate over a copy to avoid issues if all_profiles is modified during iteration (though unlikely here)
+        for profile in list(st.session_state.all_profiles):
+            # Ensure 'Fuzzy_Matched' key exists, initialize if not
             if "Fuzzy_Matched" not in profile:
                 profile["Fuzzy_Matched"] = False
 
@@ -658,22 +648,29 @@ def run_fuzzy_matching_for_all_profiles():
 
 
 # --- Main Crawling Function (Streamlit-aware) ---
-def crawl_bfs_resume_streamlit(browser_page, seed_user_id, max_crawl_depth, max_crawl_seconds, save_every, fuzzy_run_interval, status_placeholder, progress_bar):
+def crawl_bfs_resume_streamlit(browser, seed_user_ids_input, max_crawl_depth, max_crawl_seconds, save_every, fuzzy_run_interval, status_placeholder, progress_bar):
     st.session_state.is_crawling = True
     st.session_state.start_time = time.time()
     st.session_state.crawled_count = 0
     new_profiles_this_run = 0
+    fuzzy_match_counter = 0
 
-    if not st.session_state.crawl_queue and seed_user_id:
-        enqueue_user(seed_user_id, 0)
-        status_placeholder.info(f"Queue initialized with seed: {seed_user_id}")
-    elif not st.session_state.crawl_queue:
-        status_placeholder.error("Queue is empty and no seed ID provided. Cannot start crawl.")
+    # --- Initial Queue Population ---
+    # Parse seed IDs from input (assuming comma-separated)
+    if seed_user_ids_input:
+        new_seeds = [id.strip() for id in seed_user_ids_input.split(',') if id.strip()]
+        for seed_id in new_seeds:
+            if seed_id not in st.session_state.visited_ids and (seed_id, 0, None) not in st.session_state.crawl_queue:
+                enqueue_user(seed_id, 0)
+                status_placeholder.info(f"Added initial seed ID to queue: {seed_id}")
+    
+    if not st.session_state.crawl_queue:
+        status_placeholder.error("Queue is empty and no new seed IDs were provided. Cannot start crawl.")
         st.session_state.is_crawling = False
         return
 
+    # Main crawling loop
     while st.session_state.crawl_queue and st.session_state.is_crawling:
-        # Check if time limit is exceeded
         elapsed_time = time.time() - st.session_state.start_time
         if elapsed_time > max_crawl_seconds:
             status_placeholder.warning(f"🛑 Max crawl time ({max_crawl_seconds}s) reached. Stopping crawl.")
@@ -681,26 +678,26 @@ def crawl_bfs_resume_streamlit(browser_page, seed_user_id, max_crawl_depth, max_
             break
         
         # Check for Stop button press (Streamlit reruns on interaction)
-        if not st.session_state.is_crawling: # This gets updated if user clicks Stop
-            status_placeholder.info("Crawl manually stopped.")
-            break
+        # This will be handled by the Streamlit rerun logic, but a direct check here is good
+        # if not st.session_state.is_crawling: 
+        #    status_placeholder.info("Crawl manually stopped.")
+        #    break
 
         user_id, depth, parent_id = st.session_state.crawl_queue.popleft()
         depth = int(depth) # Ensure depth is an integer
 
-        # Skip if already visited or depth limit exceeded
         if user_id in st.session_state.visited_ids:
-            # status_placeholder.info(f"Skipping already visited user {user_id}") # Too verbose for status
             continue
         if max_crawl_depth > 0 and depth > max_crawl_depth:
             status_placeholder.info(f"Skipping {user_id}: Depth {depth} exceeds max_crawl_depth {max_crawl_depth}.")
             continue
 
-        status_placeholder.info(f"🔎 Crawling {user_id} at depth {depth} (Queue: {len(st.session_state.crawl_queue)}, Scraped: {st.session_state.crawled_count})")
-        progress_bar.progress((st.session_state.crawled_count % 100) / 100.0, text=f"Crawled: {st.session_state.crawled_count} | Queue: {len(st.session_state.crawl_queue)} | Current: {user_id}")
+        st.session_state.crawled_count += 1
+        current_status_text = f"🔎 Crawling {user_id} at depth {depth} | Queue: {len(st.session_state.crawl_queue)} | Scraped: {st.session_state.crawled_count}"
+        status_placeholder.info(current_status_text)
+        progress_bar.progress((st.session_state.crawled_count % 100) / 100.0, text=current_status_text)
 
         try:
-            # Use Playwright page from the cached browser
             browser_instance = get_browser()
             page = browser_instance.new_page() # Create a new page for each scrape
             profile = extract_profile_playwright(page, user_id, depth)
@@ -723,204 +720,228 @@ def crawl_bfs_resume_streamlit(browser_page, seed_user_id, max_crawl_depth, max_
                 "wiki_matched_title": wiki_info.get("matched_title", None)
             })
 
+            # Add fuzzy matching status for this profile
+            profile["Fuzzy_Matched"] = False # Mark as not yet fuzzy matched in this run, will be set true after explicit fuzzy run
+            profile["Participated_in_ICLR"] = False
+            profile["ICLR_Institution"] = ""
+            profile["Participated_in_NeurIPS"] = False
+            profile["NeurIPS_Institution"] = ""
+
             st.session_state.all_profiles.append(profile)
             new_profiles_this_run += 1
-            st.session_state.crawled_count += 1
+            
 
-            status_placeholder.success(f"✅ Scraped: {profile['name']} (h-index: {profile['h_index_all']}, {profile['country']}, depth: {depth})")
+            status_placeholder.success(f"✅ Scraped: {profile['name']} (h-index: {profile['h_index_all']}, {profile['country']})")
 
-            # Enqueue co-authors (limit 20)
-            for co_id in profile.get("coauthors", [])[:20]:
-                enqueue_user(co_id, depth + 1, user_id)
-                # Add edge to graph
-                if user_id != co_id: # Avoid self-loops
-                    increment_edge_weight(user_id, co_id)
+            # Enqueue coauthors for next iteration if within depth limit
+            if depth + 1 <= max_crawl_depth or max_crawl_depth == 0:
+                for co_id in profile.get("coauthors", []):
+                    enqueue_user(co_id, depth + 1, parent_id=user_id)
+                    increment_edge_weight(user_id, co_id) # Add/update edge in graph
 
-
-            # Save progress and run fuzzy matching periodically
+            # Periodically save progress to disk
             if st.session_state.crawled_count % save_every == 0:
+                status_placeholder.info(f"💾 Saving progress after {st.session_state.crawled_count} profiles...")
                 save_progress_to_disk()
-                status_placeholder.info(f"💾 Saved progress after {st.session_state.crawled_count} profiles.")
-                
-            if st.session_state.crawled_count % fuzzy_run_interval == 0:
-                 # Run fuzzy matching on all profiles to catch newly added ones
+
+            # Periodically run fuzzy matching on all profiles
+            fuzzy_match_counter += 1
+            if fuzzy_run_interval > 0 and fuzzy_match_counter % fuzzy_run_interval == 0:
+                status_placeholder.info(f"⚙️ Running periodic fuzzy matching after {fuzzy_match_counter} new profiles...")
                 run_fuzzy_matching_for_all_profiles()
-                st.info("Fuzzy matching completed for current batch.")
+                fuzzy_match_counter = 0 # Reset counter
 
         except Exception as e:
             status_placeholder.error(f"❌ Error scraping {user_id}: {e}")
-            # Consider re-enqueuing with a higher depth or blacklisting
-            # For now, just skip to next
-            st.session_state.visited_ids.add(user_id) # Mark as visited to avoid re-attempting immediately
-            time.sleep(random.uniform(5, 10)) # Longer delay on error
+            # Optionally, re-add to queue for retry or move to a failed list
+            # For simplicity, we'll just skip and log for now.
 
+    # Final save and status update
     st.session_state.is_crawling = False
-    save_progress_to_disk() # Final save
-    status_placeholder.success(f"✅ Crawl finished. Total new profiles scraped in this run: {new_profiles_this_run}. Total profiles in data: {len(st.session_state.all_profiles)}.")
-    st.session_state.crawl_status_message = f"✅ Crawl finished. {new_profiles_this_run} new profiles scraped."
-    st.rerun() # Rerun to update final status
+    save_progress_to_disk()
+    if new_profiles_this_run > 0:
+        run_fuzzy_matching_for_all_profiles() # Final fuzzy match run
+        st.session_state.crawl_status_message = f"✅ Crawl finished. Scraped {new_profiles_this_run} new profiles. Total profiles: {len(st.session_state.all_profiles)}."
+    else:
+        st.session_state.crawl_status_message = f"✅ Crawl finished. 0 new profiles scraped. Total profiles: {len(st.session_state.all_profiles)}. Queue was empty or all profiles visited."
+    
+    status_placeholder.success(st.session_state.crawl_status_message)
+    progress_bar.empty() # Clear the progress bar after completion
 
+    # This is where `st.rerun()` is critical for Streamlit to reflect the final state
+    st.rerun() # Rerun to update final status and UI elements
 
 # --- Streamlit UI Layout ---
+st.set_page_config(layout="wide", page_title="Scholar Profile Scraper")
 
-st.set_page_config(layout="wide", page_title="Scholar Scraper App")
-st.title("👨‍💻 Scholar Scraper & Network Analyzer")
+st.title("👨‍💻 Google Scholar Profile Scraper")
+
+# Load existing data on app start
+if 'initial_load_done' not in st.session_state:
+    with st.spinner("Loading previous session data..."):
+        load_previous_state()
+    st.session_state.initial_load_done = True
+    # Initial fuzzy matching run on load to process any profiles not yet matched
+    run_fuzzy_matching_for_all_profiles()
 
 # --- Configuration Section ---
 st.header("⚙️ Configuration")
-
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    SEED_USER_ID = st.text_input(
-        "Start Crawl from Scholar User ID (e.g., `0b_Q5gcAAAAJ`)",
-        value="0b_Q5gcAAAAJ"
+    initial_scholar_ids = st.text_area(
+        "Enter initial Scholar User IDs (comma-separated, e.g., `0b_Q5gcAAAAJ,ABCDEFGHIJ`)",
+        value="",
+        height=100,
+        key="initial_ids_input"
     )
-    MAX_CRAWL_DEPTH = st.number_input(
-        "Maximum Crawl Depth (0 for no limit, BE CAREFUL)",
-        min_value=0,
-        value=3, # Adjusted to a more reasonable default
-        help="How many 'hops' away from the seed user to crawl (co-authors of co-authors, etc.). High values can lead to very long crawls."
-    )
-    SAVE_EVERY = st.number_input(
-        "Save Progress Every (profiles)",
-        min_value=1,
-        value=5,
-        help="Number of profiles scraped before saving data to disk."
-    )
-    
+
 with col2:
-    MAX_CRAWL_SECONDS = st.number_input(
-        "Maximum Crawl Time (seconds)",
-        min_value=60, # Minimum 1 minute
-        value=3600, # Default 1 hour
-        help="Maximum time (in seconds) the crawl will run. Set to a reasonable value to prevent indefinite running."
+    max_crawl_depth = st.number_input(
+        "Max Crawl Depth (0 for infinite)",
+        min_value=0,
+        value=1,
+        step=1,
+        key="max_depth"
     )
-    FUZZY_RUN_INTERVAL = st.number_input(
-        "Run Fuzzy Match Every (profiles)",
+    max_crawl_seconds = st.number_input(
+        "Max Crawl Duration (seconds, 0 for infinite)",
+        min_value=0,
+        value=300, # 5 minutes default
+        step=60,
+        key="max_seconds"
+    )
+
+with col3:
+    save_every_n_profiles = st.number_input(
+        "Save progress every N profiles",
         min_value=1,
         value=5,
-        help="Number of profiles scraped before re-running fuzzy matching for conference participation."
+        step=1,
+        key="save_every"
+    )
+    fuzzy_run_interval = st.number_input(
+        "Run fuzzy matching every N new profiles (0 to disable periodic)",
+        min_value=0,
+        value=10,
+        step=1,
+        key="fuzzy_interval"
     )
 
-# --- Conference Data Upload ---
-st.subheader("⬆️ Conference Data Upload (Optional)")
-st.info("Upload .parquet files for ICLR and NeurIPS to enable fuzzy matching for conference participation.")
+st.subheader("📊 Conference Data Upload")
+col_conf1, col_conf2 = st.columns(2)
 
-col_iclr, col_neurips = st.columns(2)
-
-with col_iclr:
-    uploaded_iclr_file = st.file_uploader(
-        "Upload ICLR Parquet (e.g., `iclr_2020_2025_combined_data.parquet`)",
-        type=["parquet"],
-        accept_multiple_files=False,
-        key="iclr_uploader"
-    )
-    if uploaded_iclr_file is not None:
+with col_conf1:
+    iclr_file = st.file_uploader("Upload ICLR Authors CSV (optional)", type=["csv"], key="iclr_upload")
+    if iclr_file is not None:
         try:
-            st.session_state.iclr_df = pd.read_parquet(uploaded_iclr_file)
-            st.success(f"ICLR data loaded: {len(st.session_state.iclr_df)} rows.")
+            st.session_state.iclr_df = pd.read_csv(iclr_file)
+            st.success(f"✅ Loaded ICLR data: {len(st.session_state.iclr_df)} entries.")
+            st.dataframe(st.session_state.iclr_df.head())
         except Exception as e:
-            st.error(f"Error loading ICLR Parquet: {e}")
+            st.error(f"Error loading ICLR CSV: {e}")
             st.session_state.iclr_df = None
-    elif st.session_state.iclr_df is not None:
-        st.success("ICLR data previously loaded.")
 
-with col_neurips:
-    uploaded_neurips_file = st.file_uploader(
-        "Upload NeurIPS Parquet (e.g., `neurips_2020_2024_combined_data.parquet`)",
-        type=["parquet"],
-        accept_multiple_files=False,
-        key="neurips_uploader"
-    )
-    if uploaded_neurips_file is not None:
+with col_conf2:
+    neurips_file = st.file_uploader("Upload NeurIPS Authors CSV (optional)", type=["csv"], key="neurips_upload")
+    if neurips_file is not None:
         try:
-            st.session_state.neurips_df = pd.read_parquet(uploaded_neurips_file)
-            st.success(f"NeurIPS data loaded: {len(st.session_state.neurips_df)} rows.")
+            st.session_state.neurips_df = pd.read_csv(neurips_file)
+            st.success(f"✅ Loaded NeurIPS data: {len(st.session_state.neurips_df)} entries.")
+            st.dataframe(st.session_state.neurips_df.head())
         except Exception as e:
-            st.error(f"Error loading NeurIPS Parquet: {e}")
+            st.error(f"Error loading NeurIPS CSV: {e}")
             st.session_state.neurips_df = None
-    elif st.session_state.neurips_df is not None:
-        st.success("NeurIPS data previously loaded.")
 
-## Actions
+# --- Control Buttons ---
+st.header("🚀 Crawl Control")
+crawl_buttons_col1, crawl_buttons_col2 = st.columns(2)
 
-st.header("⚡ Actions")
+with crawl_buttons_col1:
+    start_crawl_button = st.button("▶️ Start/Resume Crawl", disabled=st.session_state.is_crawling)
+with crawl_buttons_col2:
+    stop_crawl_button = st.button("⏹️ Stop Crawl", disabled=not st.session_state.is_crawling)
 
+if start_crawl_button:
+    st.session_state.is_crawling = True
+    # Clear previous status message on new start
+    st.session_state.crawl_status_message = "Starting crawl..."
+    st.rerun() # Trigger a rerun to show "Starting crawl..." and disable button
+
+if stop_crawl_button:
+    st.session_state.is_crawling = False
+    st.session_state.crawl_status_message = "Crawl stopped by user."
+    st.rerun() # Trigger a rerun to update status and enable button
+
+# --- Status and Progress ---
+st.subheader("📈 Real-time Status")
 status_placeholder = st.empty()
-progress_bar = st.progress(0, text="Crawling progress...")
+progress_bar = st.progress(0, text="Initializing...")
 
-col_actions_1, col_actions_2, col_actions_3 = st.columns(3)
+status_placeholder.write(st.session_state.crawl_status_message)
 
-with col_actions_1:
-    if st.button("▶️ Start Crawl", disabled=st.session_state.is_crawling):
-        if not SEED_USER_ID:
-            status_placeholder.error("Please provide a seed user ID to start the crawl.")
-        else:
-            status_placeholder.info("Starting crawl...")
-            # This triggers the crawl function, which will update session_state
-            crawl_bfs_resume_streamlit(
-                get_browser(), # Pass the cached Playwright browser instance
-                SEED_USER_ID,
-                MAX_CRAWL_DEPTH,
-                MAX_CRAWL_SECONDS,
-                SAVE_EVERY,
-                FUZZY_RUN_INTERVAL,
-                status_placeholder,
-                progress_bar
-            )
-            # st.session_state.is_crawling will be False after crawl_bfs_resume_streamlit returns
-            st.rerun() # Rerun to update UI after crawl finishes/stops
-
-with col_actions_2:
-    if st.button("⏹️ Stop Crawl", disabled=not st.session_state.is_crawling):
-        st.session_state.is_crawling = False
-        status_placeholder.warning("Attempting to stop crawl...")
-        # The crawl_bfs_resume_streamlit loop will check st.session_state.is_crawling and break
-
-with col_actions_3:
-    if st.button("🧹 Clear All Scraped Data & Cache"):
-        if os.path.exists("scholar_profiles.csv"): os.remove("scholar_profiles.csv")
-        if os.path.exists("queue.txt"): os.remove("queue.txt")
-        if os.path.exists("coauthor_network.graphml"): os.remove("coauthor_network.graphml")
-        if os.path.exists("fuzzy_match_cache.json"): os.remove("fuzzy_match_cache.json")
-        
-        # Reset session state variables
-        st.session_state.all_profiles = []
-        st.session_state.visited_ids = set()
-        st.session_state.crawl_queue = deque()
-        st.session_state.coauthor_graph = nx.Graph()
-        st.session_state.fuzzy_cache = {}
-        st.session_state.crawled_count = 0
-        st.session_state.is_crawling = False
-        st.session_state.crawl_status_message = "All data cleared. Ready for a fresh start."
-        st.success("All scraped data and cache cleared.")
-        st.experimental_rerun()
-
-# Load state on first run or after clearing
-if st.session_state.crawled_count == 0 and not st.session_state.all_profiles: # Only load if empty
-    load_previous_state()
-
-## Current Status
-
-st.header("📊 Current Status")
-st.write(f"**Crawl Status:** {st.session_state.crawl_status_message}")
-st.write(f"**Profiles Scraped:** {len(st.session_state.all_profiles)}")
-st.write(f"**Queue Size:** {len(st.session_state.crawl_queue)}")
-st.write(f"**Unique Visited Profiles:** {len(st.session_state.visited_ids)}")
-
-# Display Scraped Data (optional, use st.expander for large data)
-if st.session_state.all_profiles:
-    st.subheader("Latest Scraped Profiles")
-    st.dataframe(pd.DataFrame(st.session_state.all_profiles).tail(10)) # Show last 10
-    
-    st.subheader("Full Scraped Data")
-    csv_data = pd.DataFrame(st.session_state.all_profiles).to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="Download Scraped Data as CSV",
-        data=csv_data,
-        file_name="scholar_profiles_full.csv",
-        mime="text/csv"
+if st.session_state.is_crawling:
+    status_placeholder.info("Crawl in progress... Do not close the tab.")
+    # Call the crawling function
+    crawl_bfs_resume_streamlit(
+        get_browser(), # Pass the cached Playwright browser instance
+        initial_scholar_ids,
+        max_crawl_depth,
+        max_crawl_seconds,
+        save_every_n_profiles,
+        fuzzy_run_interval,
+        status_placeholder,
+        progress_bar
     )
+else:
+    status_placeholder.info("Crawl is currently idle. Press 'Start/Resume Crawl' to begin or continue.")
+    progress_bar.empty() # Clear the progress bar if not crawling
 
-    # You could add more visualizations here if desired, e.g., graph analysis
+# --- Data Display ---
+st.markdown("---")
+st.header("📊 Scraped Data")
+
+if st.session_state.all_profiles:
+    df_display = pd.DataFrame(st.session_state.all_profiles)
+    # Reorder columns to match EXPECTED_COLUMNS, adding missing ones at the end
+    missing_cols = [col for col in EXPECTED_COLUMNS if col not in df_display.columns]
+    for col in missing_cols:
+        df_display[col] = None # Add missing columns with None values
+    df_display = df_display[EXPECTED_COLUMNS] # Reorder
+    
+    st.dataframe(df_display, height=400)
+    st.download_button(
+        label="Download All Profiles as CSV",
+        data=df_display.to_csv(index=False).encode('utf-8'),
+        file_name="scholar_profiles_final.csv",
+        mime="text/csv",
+    )
+else:
+    st.info("No profiles scraped yet. Start the crawl!")
+
+st.markdown("---")
+st.header("🔗 Co-author Network")
+
+if st.session_state.coauthor_graph.nodes:
+    st.write(f"Number of nodes: {st.session_state.coauthor_graph.number_of_nodes()}")
+    st.write(f"Number of edges: {st.session_state.coauthor_graph.number_of_edges()}")
+
+    # Display some graph statistics
+    if st.session_state.coauthor_graph.number_of_nodes() > 0:
+        degrees = dict(st.session_state.coauthor_graph.degree())
+        avg_degree = sum(degrees.values()) / len(degrees)
+        st.write(f"Average Degree: {avg_degree:.2f}")
+
+        # Basic visualization hint (for more complex, might need libraries like pyvis or streamlit_agraph)
+        st.info("For advanced network visualization, consider downloading the GraphML and using tools like Gephi.")
+
+    graphml_data = nx.write_graphml(st.session_state.coauthor_graph, "coauthor_network_temp.graphml")
+    with open("coauthor_network_temp.graphml", "rb") as f:
+        st.download_button(
+            label="Download Co-author Network (GraphML)",
+            data=f.read(),
+            file_name="coauthor_network_final.graphml",
+            mime="application/xml",
+        )
+else:
+    st.info("No co-author network generated yet.")
