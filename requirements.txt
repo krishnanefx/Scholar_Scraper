@@ -12,4 +12,5 @@ transformers
 torch # Note: Torch installation can be complex depending on your system (CPU/GPU). You might need to install it separately if you face issues with pip.
 mwparserfromhell
 requests
+playwright
 webdriver-manager # Used by get_driver function to manage Chrome driver
