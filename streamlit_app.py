@@ -24,6 +24,69 @@ import torch
 import mwparserfromhell # Added as it was used in clean_wiki_markup
 import requests # Added for web requests
 
+Okay, I understand you want to try running playwright install directly within your streamlit_app.py as a temporary measure to get past the deployment hurdle, even with the stated drawbacks.
+
+While I strongly reiterate the "Not Recommended for Production" warning due to performance and robustness issues, here's how you can implement it using subprocess.run(), which is generally preferred over os.system() for better control and error handling.
+
+You should place this code early in your streamlit_app.py, ideally before any Playwright-related imports or usage, but also ideally within a block that ensures it only runs once or very rarely.
+
+Here's how you can do it, with a crucial addition to make it run only once per deployment/session:
+
+Python
+
+import streamlit as st
+import subprocess
+import sys
+import os
+
+# --- Playwright Installation (Temporary - NOT FOR PRODUCTION) ---
+# This part attempts to install Playwright browsers if they are not found.
+# It uses a session state variable to ensure it only runs once per app session
+# to mitigate the performance impact.
+
+# Define a flag to check if Playwright browsers have been installed during this session
+if 'playwright_browsers_installed' not in st.session_state:
+    st.session_state.playwright_browsers_installed = False
+
+if not st.session_state.playwright_browsers_installed:
+    st.info("Attempting to install Playwright browsers. This might take a moment...")
+    try:
+        # Check if the browser executable already exists to avoid unnecessary installs
+        # This path might vary slightly based on Playwright version, but is typical
+        playwright_browser_path = os.path.expanduser("~/.cache/ms-playwright/chromium-1181/chrome-linux/headless_shell")
+        # Update: It's better to check for the cache directory itself rather than a specific versioned path
+        playwright_cache_dir = os.path.expanduser("~/.cache/ms-playwright")
+        
+        # Check if the cache directory exists and contains some files (implies browsers might be there)
+        # This is a heuristic, a more robust check would involve `playwright --version` and then
+        # programmatically checking for installed browsers, but that adds complexity.
+        # For simplicity, we'll just run install if the cache dir doesn't exist or is empty.
+        
+        if not os.path.exists(playwright_cache_dir) or not os.listdir(playwright_cache_dir):
+            # Command to install Playwright browsers
+            command = [sys.executable, "-m", "playwright", "install"]
+            
+            # Execute the command
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            
+            st.success("Playwright browsers installed successfully!")
+            st.code(result.stdout) # Show the output for debugging
+            st.session_state.playwright_browsers_installed = True
+            
+        else:
+            st.success("Playwright browsers already appear to be installed.")
+            st.session_state.playwright_browsers_installed = True
+
+    except subprocess.CalledProcessError as e:
+        st.error(f"Failed to install Playwright browsers. Error: {e.stderr}")
+        st.code(e.stdout)
+        st.code(e.stderr)
+        st.stop() # Stop the app if installation fails critically
+    except Exception as e:
+        st.error(f"An unexpected error occurred during Playwright browser installation: {e}")
+        st.stop() # Stop the app if installation fails critically
+# --- End Playwright Installation Block ---
+
 # --- Global Constants and Mappings ---
 # CONFIG
 SAVE_EVERY = 5 # How often to save progress to session state (and implicitly, to display)
