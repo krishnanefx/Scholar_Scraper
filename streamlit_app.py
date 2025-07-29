@@ -818,8 +818,6 @@ with col_neurips:
     elif st.session_state.neurips_df is not None:
         st.success("NeurIPS data previously loaded.")
 
----
-
 ## Actions
 
 st.header("⚡ Actions")
