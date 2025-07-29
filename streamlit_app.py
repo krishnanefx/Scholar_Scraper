@@ -878,9 +878,6 @@ with col_actions_3:
 if st.session_state.crawled_count == 0 and not st.session_state.all_profiles: # Only load if empty
     load_previous_state()
 
-
----
-
 ## Current Status
 
 st.header("📊 Current Status")
