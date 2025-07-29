@@ -280,27 +280,37 @@ def get_driver():
     # Check if Chrome and Chromedriver are already downloaded and executable
     if not os.path.exists(CHROME_PATH) or not os.path.exists(CHROMEDRIVER_PATH):
         st.warning("Chromium or Chromedriver not found. Attempting to download...")
-        # Download Google Chrome (Debian package)
         try:
-            # Get latest stable Chrome version
-            chrome_version_output = os.popen(
-                "wget -q -O - https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json | grep -oP '\"LATEST_RELEASE_([0-9.]+)\"' | head -1 | cut -d'_' -f3 | cut -d'\"' -f1"
-            ).read().strip()
+            # Fetch the JSON directly using requests
+            response = requests.get("https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json")
+            response.raise_for_status() # Raise an exception for HTTP errors
+            versions_data = response.json()
 
-            if not chrome_version_output:
-                st.error("Could not determine latest Chrome stable version.")
-                raise Exception("Chrome version determination failed.")
+            # Get the latest stable Chrome version and its corresponding Chromedriver URL for linux64
+            latest_stable_chrome_version = versions_data['channels']['Stable']['version']
+            chromedriver_url = None
 
-            # Download URL for the latest stable Chrome (x86_64, .deb)
-            # This URL is for Google Chrome itself, which is often easier to install than chromium-browser
-            chrome_download_url = f"https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+            for download_entry in versions_data['channels']['Stable']['downloads']['chromedriver']:
+                if download_entry['platform'] == 'linux64':
+                    chromedriver_url = download_entry['url']
+                    break
             
+            if not chromedriver_url:
+                st.error("Could not find linux64 Chromedriver download URL for latest stable Chrome.")
+                raise Exception("Chromedriver URL determination failed.")
+
+            st.info(f"Latest Stable Chrome Version: {latest_stable_chrome_version}")
+            st.info(f"Matching Chromedriver URL: {chromedriver_url}")
+
+            # Download Google Chrome (Debian package)
+            chrome_download_url = f"https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
             st.info(f"Downloading Google Chrome stable from {chrome_download_url}...")
             os.system(f"wget {chrome_download_url} -O /tmp/google-chrome-stable_current_amd64.deb")
-            os.system("sudo dpkg -i /tmp/google-chrome-stable_current_amd64.deb || sudo apt-get install -fy")
+            # Install Chrome and resolve dependencies using dpkg, falling back to apt-get -f install
+            os.system("sudo dpkg -i /tmp/google-chrome-stable_current_amd64.deb || sudo apt-get update && sudo apt-get install -fy")
             
-            # This will install Chrome to /opt/google/chrome/google-chrome,
-            # we want a symlink to /usr/bin for consistent access
+            # Create a symlink from /opt/google/chrome/google-chrome to /usr/bin/google-chrome
+            # if it doesn't already exist, for consistent PATH access
             if not os.path.exists("/usr/bin/google-chrome"):
                 os.system("sudo ln -s /opt/google/chrome/google-chrome /usr/bin/google-chrome")
             
@@ -309,40 +319,24 @@ def get_driver():
                 raise Exception("Google Chrome installation failed.")
             st.success("Google Chrome installed!")
 
-            # Download Chromedriver matching the installed Chrome version
-            # Fetch the exact version of the installed Chrome
-            installed_chrome_version_output = os.popen("google-chrome --version").read().strip()
-            # Extract version number like "126.0.6478.182"
-            installed_chrome_version = re.search(r"(\d+\.\d+\.\d+\.\d+)", installed_chrome_version_output)
-            if not installed_chrome_version:
-                st.error("Could not determine installed Chrome version to match Chromedriver.")
-                raise Exception("Installed Chrome version determination failed.")
-            installed_chrome_version = installed_chrome_version.group(1)
-            
-            # Use Chrome for Testing (CfT) API to find compatible Chromedriver
-            chromedriver_api_url = f"https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
-            response = requests.get(chromedriver_api_url)
-            response.raise_for_status()
-            versions_data = response.json()
-            
-            chromedriver_url = None
-            for version_entry in versions_data['versions']:
-                if version_entry['version'] == installed_chrome_version:
-                    for download in version_entry['downloads']['chromedriver']:
-                        if download['platform'] == 'linux64':
-                            chromedriver_url = download['url']
-                            break
-                if chromedriver_url:
-                    break
-            
-            if not chromedriver_url:
-                st.error(f"Could not find a matching Chromedriver for Chrome version {installed_chrome_version}")
-                raise Exception("Matching Chromedriver URL not found.")
-
+            # Download and setup Chromedriver
             st.info(f"Downloading Chromedriver from {chromedriver_url}...")
             os.system(f"wget {chromedriver_url} -O /tmp/chromedriver.zip")
             os.system(f"unzip -o /tmp/chromedriver.zip -d /tmp/chromedriver_extracted")
-            os.system(f"sudo mv /tmp/chromedriver_extracted/chromedriver {CHROMEDRIVER_PATH}")
+            
+            # The extracted chromedriver might be in a subdir, e.g., /tmp/chromedriver_extracted/chromedriver-linux64/chromedriver
+            # Need to find the actual executable within the unzipped directory
+            extracted_driver_path = ""
+            for root, dirs, files in os.walk("/tmp/chromedriver_extracted"):
+                if "chromedriver" in files:
+                    extracted_driver_path = os.path.join(root, "chromedriver")
+                    break
+            
+            if not extracted_driver_path:
+                st.error("Chromedriver executable not found in the extracted zip.")
+                raise Exception("Chromedriver extraction failed.")
+
+            os.system(f"sudo mv {extracted_driver_path} {CHROMEDRIVER_PATH}")
             os.system(f"sudo chmod +x {CHROMEDRIVER_PATH}")
 
             if not os.path.exists(CHROMEDRIVER_PATH):
@@ -352,6 +346,7 @@ def get_driver():
 
         except Exception as e:
             st.error(f"Failed to set up Chrome and Chromedriver dynamically: {e}")
+            st.exception(e) # Show full traceback in Streamlit
             st.stop() # Stop the app if setup fails
 
     options = Options()
