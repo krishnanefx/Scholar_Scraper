@@ -1,0 +1,15 @@
+streamlit
+selenium
+beautifulsoup4
+networkx
+tqdm # Although replaced for display, underlying logic might still use it or it's a transitive dependency
+sentence-transformers
+scikit-learn
+fuzzywuzzy
+python-Levenshtein # Required by fuzzywuzzy for faster processing
+pandas
+mwparserfromhell
+requests
+torch
+transformers
+webdriver-manager # Recommended for local development to auto-manage chromedriver
