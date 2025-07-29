@@ -851,8 +851,6 @@ This application allows you to crawl Google Scholar profiles and extract public 
 including co-authors, research interests, and integrate with Wikipedia data.
 """)
 
----
-
 ### Configuration
 col1, col2, col3 = st.columns(3)
 
@@ -900,7 +898,6 @@ if neurips_file:
     except Exception as e:
         st.error(f"Error loading NeurIPS CSV: {e}")
 
----
 
 ### Control Panel
 status_placeholder = st.empty()
@@ -944,8 +941,6 @@ if col_buttons3.button("Load Previous State", disabled=st.session_state.is_crawl
 if st.button("Run Fuzzy Matching on Loaded Data"):
     run_fuzzy_matching_for_all_profiles()
     st.rerun() # Rerun to refresh the data display
-
----
 
 ### Current State
 st.subheader("Crawling Statistics")
