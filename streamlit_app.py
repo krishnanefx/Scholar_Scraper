@@ -657,13 +657,15 @@ def crawl_bfs_resume_streamlit(browser, seed_user_ids_input, max_crawl_depth, ma
 
     # --- Initial Queue Population ---
     # Parse seed IDs from input (assuming comma-separated)
-    if seed_user_ids_input:
+    if seed_user_ids_input: # This is the key check!
         new_seeds = [id.strip() for id in seed_user_ids_input.split(',') if id.strip()]
         for seed_id in new_seeds:
-            if seed_id not in st.session_state.visited_ids and (seed_id, 0, None) not in st.session_state.crawl_queue:
-                enqueue_user(seed_id, 0)
+            # This needs to be slightly adjusted for the tuple format in the deque
+            # Ensure we don't add duplicates if already in queue with *any* depth
+            if seed_id not in st.session_state.visited_ids and not any(item[0] == seed_id for item in st.session_state.crawl_queue):
+                enqueue_user(seed_id, 0) # Add with depth 0
                 status_placeholder.info(f"Added initial seed ID to queue: {seed_id}")
-    
+
     if not st.session_state.crawl_queue:
         status_placeholder.error("Queue is empty and no new seed IDs were provided. Cannot start crawl.")
         st.session_state.is_crawling = False
