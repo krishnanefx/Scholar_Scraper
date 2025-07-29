@@ -1,4 +1,3 @@
-# Essential for Playwright on many Linux systems (like Streamlit Cloud's Debian/Ubuntu base)
 libgbm1
 libnss3
 libnspr4
@@ -11,10 +10,3 @@ libpango-1.0-0
 libcairo2
 libgdk-pixbuf2.0-0
 libatspi2.0-0
-# Additional ones that might be useful for some cases, but start with the above
-libdrm2
-libxcomposite1
-libxdamage1
-libxfixes3
-libasound2
-libwayland-client0
