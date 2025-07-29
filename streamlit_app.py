@@ -277,17 +277,27 @@ def get_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    # This path might need to be adjusted for Streamlit Cloud deployment or local specific setups
-    # For Streamlit Cloud, you might need to use a specific buildpack or an already provided binary
-    # options.binary_location = os.environ.get("CHROMIUM_PATH") # Example for specific environments
+    options.add_argument("--window-size=1920,1080") # Good practice for headless
+    options.add_argument("--disable-extensions") # Good practice
+    options.add_argument("--proxy-server='direct://'") # Avoid proxy issues
+    options.add_argument("--proxy-bypass-list=*") # Avoid proxy issues
+    options.add_argument("--start-maximized") # Maximize window
+    options.add_argument("--no-zygote") # For some Linux environments
+
     try:
-        # Try to use webdriver_manager if available for local development convenience
-        from webdriver_manager.chrome import ChromeDriverManager
-        driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
+        # These paths are standard for Chromium and Chromedriver when installed via apt-get
+        # on Debian/Ubuntu-based systems (like Streamlit Cloud's environment).
+        options.binary_location = "/usr/bin/chromium-browser"
+        driver = webdriver.Chrome(
+            executable_path="/usr/bin/chromedriver",
+            options=options
+        )
+        st.success("Chromedriver and Chromium initialized successfully!")
     except Exception as e:
-        st.warning(f"webdriver_manager failed: {e}. Attempting to use default chromedriver in PATH.")
-        st.warning("Ensure `chromedriver` is in your system's PATH or explicitly provided.")
-        driver = webdriver.Chrome(options=options) # Assumes chromedriver is in PATH
+        st.error(f"Failed to initialize Chrome driver. Error: {e}")
+        st.error("This often happens on cloud platforms if Chromium or Chromedriver are not correctly installed or linked.")
+        st.exception(e) # Display full exception details in the UI
+        st.stop() # Stop the app if the driver fails to initialize
     return driver
 
 def extract_profile(driver, user_id, depth):
