@@ -6,14 +6,15 @@ import re
 import pandas as pd
 import tldextract
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 import networkx as nx
 import numpy as np
 from fuzzywuzzy import process, fuzz
 from collections import defaultdict, deque
 from datetime import datetime
 import difflib # Added for fuzzy_wikipedia_search
+
+# Playwright specific import
+from playwright.sync_api import sync_playwright
 
 # Streamlit specific imports
 import streamlit as st
@@ -269,42 +270,35 @@ def normalize_interest_phrases(raw_text):
         processed.append(interest)
     return processed
 
-import streamlit as st
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
+@st.cache_resource(show_spinner="Initializing Playwright Browser...")
+def get_browser():
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=True) # Set headless=False for visual debugging
+    return browser
 
-@st.cache_resource(show_spinner="Initializing Selenium WebDriver...")
-def get_driver():
-    chrome_path = "/usr/bin/google-chrome-stable"
-    chromedriver_path = "/usr/bin/chromedriver"
-
-    options = Options()
-    options.add_argument("--headless=new")  # Modern headless mode
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.binary_location = chrome_path
-
-    service = Service(executable_path=chromedriver_path)
-    driver = webdriver.Chrome(service=service, options=options)
-    return driver
-
-def extract_profile(driver, user_id, depth):
+def extract_profile(browser, user_id, depth):
+    page = browser.new_page()
     url = f"https://scholar.google.com/citations?hl=en&user={user_id}"
-    driver.get(url)
-    time.sleep(random.uniform(1.5, 3.0))
-    soup = BeautifulSoup(driver.page_source, "html.parser")
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_timeout(random.uniform(1500, 3000)) # wait for 1.5 to 3 seconds
 
-    name = soup.select_one("#gsc_prf_in").get_text(strip=True) if soup.select_one("#gsc_prf_in") else "Unknown"
-    position = soup.select_one(".gsc_prf_il").get_text(strip=True) if soup.select_one(".gsc_prf_il") else "Unknown"
-    email = soup.select_one("#gsc_prf_ivh").get_text(strip=True) if soup.select_one("#gsc_prf_ivh") else "Unknown"
-    interests_raw = ", ".join(tag.text for tag in soup.select("#gsc_prf_int a")) if soup.select("#gsc_prf_int a") else ""
+    soup = BeautifulSoup(page.content(), "html.parser")
+
+    # Using Playwright locators for robustness, then falling back to BeautifulSoup for complex parsing
+    name = page.locator("#gsc_prf_in").text_content(strip=True) if page.locator("#gsc_prf_in") else "Unknown"
+    position = page.locator(".gsc_prf_il").text_content(strip=True) if page.locator(".gsc_prf_il") else "Unknown"
+    email = page.locator("#gsc_prf_ivh").text_content(strip=True) if page.locator("#gsc_prf_ivh") else "Unknown"
+
+    interests_elements = page.query_selector_all("#gsc_prf_int a")
+    interests_raw = ", ".join(tag.text_content() for tag in interests_elements) if interests_elements else ""
     interest_phrases = normalize_interest_phrases(interests_raw)
     country = infer_country_from_email_field(email)
     institution = get_institution_from_email(email)
 
     citations_all = "0"
     h_index_all = "0"
+
+    # Use Playwright for metrics rows directly if possible, or fall back to BeautifulSoup
     metrics_rows = soup.select("#gsc_rsb_st tbody tr")
     if metrics_rows and len(metrics_rows) >= 2:
         try:
@@ -314,11 +308,14 @@ def extract_profile(driver, user_id, depth):
             pass
 
     coauthors = []
-    for a_tag in soup.select(".gsc_rsb_aa .gsc_rsb_a_desc a"):
-        href = a_tag.get("href", "")
-        if "user=" in href:
+    coauthor_elements = page.query_selector_all(".gsc_rsb_aa .gsc_rsb_a_desc a")
+    for a_tag in coauthor_elements:
+        href = a_tag.get_attribute("href")
+        if href and "user=" in href:
             co_id = href.split("user=")[1].split("&")[0]
             coauthors.append(co_id)
+    
+    page.close() # Close the page after extraction
     st.session_state.status_message = f"✅ Found {len(coauthors)} co-authors for {user_id}"
     st.sidebar.caption(st.session_state.status_message) # Display in sidebar
 
@@ -333,21 +330,24 @@ def extract_profile(driver, user_id, depth):
     }
     return profile
 
-def get_coauthors_from_profile(driver, user_id):
+def get_coauthors_from_profile(browser, user_id):
     """
     Extracts co-author IDs from a given Google Scholar profile page.
     Used for re-queuing if the main queue becomes empty.
     """
+    page = browser.new_page()
     url = f"https://scholar.google.com/citations?hl=en&user={user_id}"
-    driver.get(url)
-    time.sleep(random.uniform(1.0, 2.0)) # Shorter sleep for just co-authors
-    soup = BeautifulSoup(driver.page_source, "html.parser")
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_timeout(random.uniform(1000, 2000)) # Shorter sleep for just co-authors
+
     coauthors = []
-    for a_tag in soup.select(".gsc_rsb_aa .gsc_rsb_a_desc a"):
-        href = a_tag.get("href", "")
-        if "user=" in href:
+    coauthor_elements = page.query_selector_all(".gsc_rsb_aa .gsc_rsb_a_desc a")
+    for a_tag in coauthor_elements:
+        href = a_tag.get_attribute("href")
+        if href and "user=" in href:
             co_id = href.split("user=")[1].split("&")[0]
             coauthors.append(co_id)
+    page.close()
     return coauthors
 
 
@@ -439,7 +439,7 @@ def enqueue_user(user_id, depth, parent_id=None):
         return
     st.session_state.queue.append((user_id, depth, parent_id))
 
-def crawl_bfs_resume(driver, max_crawl_depth, max_crawl_seconds):
+def crawl_bfs_resume(browser, max_crawl_depth, max_crawl_seconds):
     st.session_state.is_crawling = True
     start_time = time.time()
     total_scraped_this_run = 0
@@ -480,7 +480,7 @@ def crawl_bfs_resume(driver, max_crawl_depth, max_crawl_seconds):
         # st.experimental_rerun() # Removed: Calling this in a loop can cause infinite reruns. Updates will happen on next Streamlit run cycle.
 
         try:
-            profile = extract_profile(driver, user_id, depth)
+            profile = extract_profile(browser, user_id, depth)
             st.session_state.visited_depths[user_id] = depth
             visited_ids.add(user_id) # Add to the set of visited IDs
 
@@ -585,19 +585,19 @@ if col1.button("Start/Resume Crawl", disabled=st.session_state.is_crawling):
         # This part requires fetching co-authors *outside* the main crawl loop
         st.sidebar.info("Queue empty. Attempting to re-populate queue from recent profiles.")
         recent_profiles = st.session_state.all_profiles[-20:] # Look at last 20 profiles
-        driver_instance = get_driver() # Get driver for this operation
+        browser_instance = get_browser() # Get browser for this operation
 
         coauthors_to_add = set()
         for p in recent_profiles:
             if p["search_depth"] < max_crawl_depth: # Only add co-authors if not at max depth
                 try:
-                    new_coauthors = get_coauthors_from_profile(driver_instance, p["user_id"])
+                    new_coauthors = get_coauthors_from_profile(browser_instance, p["user_id"])
                     for co_id in new_coauthors:
                         if co_id not in st.session_state.visited_depths and co_id not in {q[0] for q in st.session_state.queue}:
                             coauthors_to_add.add((co_id, p["search_depth"] + 1, p["user_id"]))
                 except Exception as e:
                     st.sidebar.warning(f"Failed to get co-authors for {p['user_id']} to resume: {e}")
-        
+            
         if coauthors_to_add:
             for co_id, depth, parent_id in coauthors_to_add:
                 enqueue_user(co_id, depth, parent_id)
@@ -649,8 +649,8 @@ else:
 # Run the crawl if the state indicates it should be running
 if st.session_state.is_crawling:
     with st.spinner("Crawling in progress..."):
-        driver = get_driver() # Get the cached driver instance
-        crawl_bfs_resume(driver, max_crawl_depth, max_crawl_seconds)
+        browser = get_browser() # Get the cached browser instance
+        crawl_bfs_resume(browser, max_crawl_depth, max_crawl_seconds)
     # After crawl_bfs_resume returns (either finished or stopped by user/time),
     # ensure UI reflects the final state
     st.rerun() # Use st.rerun() if you really need to force a rerun and your Streamlit version supports it
@@ -666,7 +666,4 @@ with st.expander("Show Raw Session State"):
         "neurips_df_loaded": st.session_state._neurips_df is not None,
         "iclr_file_uploaded_status": "present" if st.session_state.iclr_file_uploaded else "not uploaded",
         "neurips_file_uploaded_status": "present" if st.session_state.neurips_file_uploaded else "not uploaded",
-        # Displaying full profiles/queue can be very large, use with caution for large datasets
-        # "all_profiles_sample": st.session_state.all_profiles[:5],
-        # "queue_sample": list(st.session_state.queue)[:5]
     })
