@@ -1,3 +1,11 @@
-streamlit
+psutil
+pandas
+tldextract
+beautifulsoup4
 selenium
-webdriver-manager
+networkx
+tqdm
+sentence-transformers
+scikit-learn
+fuzzywuzzy
+python-Levenshtein
