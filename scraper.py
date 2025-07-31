@@ -21,6 +21,8 @@ from fuzzywuzzy import process, fuzz
 from collections import Counter, defaultdict, deque
 from transformers import pipeline
 import torch
+import socket
+import threading
 
 # Suppress tokenizers parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -348,6 +350,15 @@ def get_author_wikipedia_info(author_name):
     info["is_researcher_ml"] = classify_summary(summary)
     info["matched_title"] = matched_title
     return info
+
+def keep_port_open():
+    """Bind to a port so Render thinks this is a web server"""
+    s = socket.socket()
+    s.bind(('', int(os.environ.get('PORT', 10000))))  # Default to port 10000 if PORT not set
+    s.listen(1)
+    while True:
+        conn, addr = s.accept()
+        conn.close()
 
 # === PROFILE EXTRACTION ===
 def extract_profile(driver, user_id, depth):
@@ -742,4 +753,5 @@ def main():
         driver.quit()
 
 if __name__ == "__main__":
+    threading.Thread(target=keep_port_open, daemon=True).start()
     main()
