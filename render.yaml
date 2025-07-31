@@ -1,0 +1,7 @@
+services:
+  - type: worker
+    name: scholar-scraper-worker
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scraper.py
+    plan: free
