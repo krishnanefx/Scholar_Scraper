@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: scholar-scraper-fake-worker
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python scraper.py
