@@ -7,11 +7,6 @@ import numpy as np
 from collections import Counter
 from fuzzywuzzy import process
 import ast
-import plotly.graph_objects as go
-from scipy.optimize import curve_fit
-from datetime import datetime
-
-
 st.set_page_config(page_title="AI Researcher Database", page_icon="📚", layout="wide")
 
 st.title("📚 Scholar Queue Enqueuer")
