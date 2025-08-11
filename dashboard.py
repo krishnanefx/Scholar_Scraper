@@ -7,6 +7,10 @@ import numpy as np
 from collections import Counter
 from fuzzywuzzy import process
 import ast
+import plotly.graph_objects as go
+from scipy.optimize import curve_fit
+from datetime import datetime
+
 
 st.set_page_config(page_title="AI Researcher Database", page_icon="📚", layout="wide")
 
@@ -273,7 +277,6 @@ FELLOWSHIP_COLORS = {
     "wwrf fellow": "#800080"                                  # purple
 }
 
-
 def extract_prestigious_awards(award_str):
     if not award_str or not isinstance(award_str, str):
         return []
@@ -376,7 +379,6 @@ if os.path.exists(PROFILES_FILE):
         st.warning("⚠️ Skipping SG coauthor count: required columns not found.")
 
     # === 📊 Profile Statistics ===
-    st.subheader("📊 Profile Stats")
     col1, col2, col3 = st.columns(3)
     col1.metric("👤 Total Profiles", len(df))
 
@@ -403,22 +405,56 @@ if os.path.exists(PROFILES_FILE):
     show_iclr = False
     show_awards = False
     show_fellowships = False
-    
+
     if "NeurIPS_Institution" in df:
         total_neurips = 35609
         neurips_count = df["NeurIPS_Institution"].notna().sum()
         neurips_percent = neurips_count / total_neurips * 100
-        col4.metric("🧠 NeurIPS Presenters", f"{neurips_count} / {total_neurips}", help=f"{neurips_percent:.1f}%")
-        if col4.button("Show NeurIPS Presenters Details"):
-            show_neurips = True
+        profiles_crawled = len(df)
+
+        # To avoid division by zero if no neurips participants found yet
+        if neurips_percent > 0:
+            pred_90 = int(profiles_crawled * 90 / neurips_percent)
+        else:
+            pred_50 = pred_100 = pred_90 = pred_80 = pred_60 = pred_70 = "N/A"
+
+        help_text = (
+            f"{neurips_percent:.1f}% of NeurIPS participants found\n"
+            f"~{pred_90} profiles needed for 90% coverage"
+        )
+
+        col4.metric(
+            "🧠 NeurIPS Presenters",
+            f"{neurips_count} / {total_neurips}",
+            help=help_text
+        )
+    if col4.button("Show NeurIPS Presenters Details"):
+        show_neurips = True
 
     if "ICLR_Institution" in df:
         total_iclr = 27907
         iclr_count = df["ICLR_Institution"].notna().sum()
         iclr_percent = iclr_count / total_iclr * 100
-        col5.metric("🧠 ICLR Presenters", f"{iclr_count} / {total_iclr}", help=f"{iclr_percent:.1f}%")
-        if col5.button("Show ICLR Presenters Details"):
-            show_iclr = True
+        profiles_crawled = len(df)
+
+        # To avoid division by zero if no neurips participants found yet
+        if iclr_percent > 0:
+            pred_90 = int(profiles_crawled * 90 / iclr_percent)
+        else:
+            pred_50 = pred_100 = pred_90 = pred_80 = pred_60 = pred_70 = "N/A"
+
+        help_text = (
+            f"{iclr_percent:.1f}% of ICLR participants found\n"
+            f"~{pred_90} profiles needed for 90% coverage"
+        )
+
+        col5.metric(
+            "🧠 ICLR Presenters",
+            f"{iclr_count} / {total_iclr}",
+            help=help_text
+        )
+    if col5.button("Show ICLR Presenters Details"):
+        show_neurips = True
     
     if "wiki_awards" in df.columns:
         df["num_awards"] = df["wiki_awards"].fillna("").apply(lambda x: len(extract_prestigious_awards(x)))
@@ -466,6 +502,8 @@ if os.path.exists(PROFILES_FILE):
         st.write("### 🎓 Fellowship Holders")
         fellowship_holders_df = df[df["num_fellowships"] > 0][display_cols].sort_values("num_fellowships", ascending=False).reset_index(drop=True)
         st.dataframe(fellowship_holders_df, use_container_width=True)
+
+
 
     # === 🌍 Country Distribution ===
     if "country" in df:
@@ -642,7 +680,6 @@ if os.path.exists(PROFILES_FILE):
 
 else:
     st.info("📂 No profiles file found yet. Start crawling to generate one.")
-
 
 st.divider()
 st.header("🔍 Search Authors by Name (Fuzzy)")
