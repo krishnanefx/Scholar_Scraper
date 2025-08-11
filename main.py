@@ -285,7 +285,6 @@ def tag_interest_phrases(phrases):
             except Exception:
                 phrase_to_topics[phrase] = []
         tags.update(phrase_to_topics[phrase])
-        print("tag_interest_phrases", time.time() - start)
     return sorted(tags)
 
 # === WIKIPEDIA FUNCTIONS ===
@@ -313,7 +312,6 @@ def clean_wiki_markup(raw_text):
     cleaned_text = wikicode.strip_code()
     cleaned_text = re.sub(r';+\s*', '; ', cleaned_text.replace('\n', '; ')).strip()
     cleaned_text = re.sub(r'[{}\|]', '', cleaned_text).strip('; ').strip()
-    print("clean wiki markup", time.time() - start)
     return cleaned_text
 
 def fuzzy_wikipedia_search(name, threshold=0.90, max_results=5):
@@ -343,7 +341,6 @@ def fuzzy_wikipedia_search(name, threshold=0.90, max_results=5):
         score = difflib.SequenceMatcher(None, name.lower(), title.lower()).ratio()
         if score > best_score:
             best_score, best_match = score, title
-    print("fuzzy wiki search", time.time() - start)
     return best_match if best_score >= threshold else None
 
 def get_wikipedia_summary(page_title):
@@ -797,8 +794,6 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
         all_profiles.extend(enriched_profiles)
         profile_batch = []
         save_progress(all_profiles)
-
-    print("Crawl BFS", time.time() - start_time)
 
     save_queue(queue)
     save_progress(all_profiles)
