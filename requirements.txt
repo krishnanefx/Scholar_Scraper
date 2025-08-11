@@ -1,8 +1,4 @@
 streamlit
-os  
-re  
-json
-ast
 requests
 mwparserfromhell
 transformers
