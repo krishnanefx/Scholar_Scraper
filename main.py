@@ -546,7 +546,7 @@ def ensure_progress_csv(path):
         pd.DataFrame(columns=EXPECTED_COLUMNS).to_csv(path, index=False)
     else:
         try:
-            df = pd.read_csv(path)
+            df = pd.read_csv(path, low_memory=False)
             missing_cols = [col for col in EXPECTED_COLUMNS if col not in df.columns]
             if missing_cols:
                 pd.DataFrame(columns=EXPECTED_COLUMNS).to_csv(path, index=False)
@@ -650,7 +650,7 @@ def load_progress():
     # Load profiles
     if os.path.exists(PROGRESS_CSV):
         try:
-            profiles_df = pd.read_csv(PROGRESS_CSV)
+            profiles_df = pd.read_csv(PROGRESS_CSV, low_memory=False)
             all_profiles = profiles_df.to_dict(orient="records")
             for p in all_profiles:
                 visited_depths[p["user_id"]] = p.get("search_depth", 0)
@@ -718,15 +718,19 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
     INSERT_CHECK_INTERVAL = 30
     last_insert_check = time.time()
 
-    visited_ids = {p.get("user_id") for p in all_profiles if isinstance(p, dict)}
-
+    visited_ids = set(p.get("user_id") for p in all_profiles if isinstance(p, dict))
     if force:
         queued_user_ids = set(item[0] for item in queue)
         for uid in queued_user_ids:
             visited_depths.pop(uid, None)
 
     profile_batch = []
-    BATCH_SIZE = 100
+    BATCH_SIZE = 20
+    SAVE_INTERVAL = 100
+    batch_since_save = 0
+
+    # Convert visited_depths to set for O(1) lookup
+    visited_set = set(visited_depths.keys())
 
     while queue:
         if time.time() - last_insert_check > INSERT_CHECK_INTERVAL:
@@ -735,16 +739,14 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
                     with open(INSERT_FILE, "r") as f:
                         new_lines = [line.strip() for line in f if line.strip()]
                     os.remove(INSERT_FILE)
-
                     new_items = []
                     for line in new_lines:
                         try:
                             user_id, depth, parent = json.loads(line)
-                            if user_id not in visited_depths and not any(user_id == q[0] for q in queue):
+                            if user_id not in visited_set and not any(user_id == q[0] for q in queue):
                                 new_items.append((user_id, depth, parent))
                         except Exception:
                             continue
-                    
                     if new_items:
                         for item in reversed(new_items):
                             queue.appendleft(item)
@@ -758,38 +760,41 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
         if time.time() - start_time > MAX_CRAWL_SECONDS:
             break
 
-        if not force and user_id in visited_depths:
+        if not force and user_id in visited_set:
             continue
 
         try:
             profile = extract_profile(driver, user_id, depth, parent_id)
             visited_depths[user_id] = depth
+            visited_set.add(user_id)
             profile_batch.append(profile)
             total_scraped += 1
 
             # Enqueue coauthors
             for co_id in profile.get("coauthors", [])[:20]:
-                if co_id not in visited_depths and co_id != user_id:
+                if co_id not in visited_set and co_id != user_id:
                     enqueue_user(queue, co_id, depth + 1, user_id)
 
             # Process batch if size reached
             if len(profile_batch) >= BATCH_SIZE:
-                with Pool(cpu_count()-4) as pool:
+                with Pool(max(1, cpu_count()-1)) as pool:
                     enriched_profiles = pool.map(enrich_profile, profile_batch)
                 all_profiles.extend(enriched_profiles)
                 profile_batch = []
-
+                batch_since_save += len(enriched_profiles)
                 print(f"✅ Processed {total_scraped} profiles so far")
-                
-                save_queue(queue)
-                save_progress(all_profiles)
+                progress_bar.update(len(enriched_profiles))
+                if batch_since_save >= SAVE_INTERVAL:
+                    save_queue(queue)
+                    save_progress(all_profiles)
+                    batch_since_save = 0
 
         except Exception as e:
             print(f"❌ Error scraping {user_id}: {e}")
 
     # Flush leftover profiles after queue emptied
     if profile_batch:
-        with Pool(cpu_count()) as pool:
+        with Pool(max(1, cpu_count()-1)) as pool:
             enriched_profiles = pool.map(enrich_profile, profile_batch)
         all_profiles.extend(enriched_profiles)
         profile_batch = []

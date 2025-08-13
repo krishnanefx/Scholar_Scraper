@@ -7,6 +7,11 @@ import numpy as np
 from collections import Counter
 from fuzzywuzzy import process
 import ast
+import plotly.graph_objects as go
+from scipy.optimize import curve_fit
+from datetime import datetime
+
+
 st.set_page_config(page_title="AI Researcher Database", page_icon="📚", layout="wide")
 
 st.title("📚 Scholar Queue Enqueuer")
@@ -449,8 +454,8 @@ if os.path.exists(PROFILES_FILE):
             help=help_text
         )
     if col5.button("Show ICLR Presenters Details"):
-        show_neurips = True
-    
+        show_iclr = True  # <-- FIXED: was show_neurips =
+
     if "wiki_awards" in df.columns:
         df["num_awards"] = df["wiki_awards"].fillna("").apply(lambda x: len(extract_prestigious_awards(x)))
         num_award_winners = (df["num_awards"] > 0).sum()
@@ -955,3 +960,127 @@ if os.path.exists(INSERT_FILE):
         st.info("Queue is currently empty.")
 else:
     st.info("No insert file found yet. Add users to begin populating it.")
+
+# === Network Graph Visualization Section ===
+import networkx as nx
+from pyvis.network import Network
+import streamlit.components.v1 as components
+
+st.divider()
+st.header("🌐 Visualize Author Network (3 Degrees)")
+
+if os.path.exists(PROFILES_FILE):
+    df_net = pd.read_csv(PROFILES_FILE, engine='python', on_bad_lines='skip')
+    st.markdown("Enter one or more user_ids (one per line) to visualize their combined network:")
+    user_ids_input = st.text_area("User IDs for Network Graph", placeholder="Paste user_ids here, one per line")
+    degree_choice = st.selectbox("Degree of separation:", [1, 2, 3], index=2, help="Choose how many degrees of separation to include in the network graph.")
+
+    if st.button("Generate and Export Network for Gephi") and user_ids_input.strip():
+        input_ids = [uid.strip() for uid in user_ids_input.replace(",", "\n").splitlines() if uid.strip()]
+        G = nx.Graph()
+        # Build the network from user_id and coauthors columns
+        for idx, row in df_net.iterrows():
+            uid = str(row.get('user_id', '')).strip()
+            coauthors_raw = row.get('coauthors', None)
+            if not uid or pd.isna(coauthors_raw):
+                continue
+            try:
+                coauthors = ast.literal_eval(coauthors_raw) if isinstance(coauthors_raw, str) and coauthors_raw.strip().startswith("[") else []
+            except Exception:
+                coauthors = []
+            for c in coauthors:
+                # coauthors can be dicts or strings
+                if isinstance(c, dict) and 'user_id' in c:
+                    co_id = str(c['user_id']).strip()
+                elif isinstance(c, str):
+                    co_id = c.strip()
+                else:
+                    continue
+                if co_id:
+                    G.add_edge(uid, co_id)
+
+        # Check which input IDs are in the graph
+        missing = [uid for uid in input_ids if uid not in G]
+        if missing:
+            st.warning(f"These user IDs were not found in the network: {', '.join(missing)}")
+        found_ids = [uid for uid in input_ids if uid in G]
+        if not found_ids:
+            st.error("None of the entered user IDs were found in the network.")
+        else:
+            # Union of all nodes within selected degree for all found_ids
+            nodes_within = set()
+            for uid in found_ids:
+                nodes_within.update(nx.single_source_shortest_path_length(G, uid, cutoff=degree_choice).keys())
+            subG = G.subgraph(nodes_within)
+
+
+            # Efficient shell assignment and node attribute extraction
+            shells = []
+            main_shell = [n for n in subG.nodes if n in found_ids]
+            shells.append(main_shell)
+            layer1 = list(set.union(*(set(subG.neighbors(n)) for n in main_shell)) - set(main_shell)) if main_shell else []
+            if layer1:
+                shells.append(layer1)
+            layer2 = list(set.union(*(set(subG.neighbors(n)) for n in layer1)) - set(main_shell) - set(layer1)) if layer1 else []
+            layer2 = [n for n in layer2 if subG.degree[n] > 3]
+            if layer2:
+                shells.append(layer2)
+            layer3 = list(set.union(*(set(subG.neighbors(n)) for n in layer2)) - set(main_shell) - set(layer1) - set(layer2)) if layer2 else []
+            layer3 = [n for n in layer3 if subG.degree[n] > 3]
+            if layer3:
+                shells.append(layer3)
+
+            # Assign depth and gather node attributes in one pass
+            node_depth = {}
+            node_citations = {}
+            node_labels = {}
+            user_id_to_row = {str(row['user_id']).strip(): row for _, row in df_net.iterrows()}
+            for depth, shell in enumerate(shells):
+                for n in shell:
+                    node_depth[n] = depth
+            for n in subG.nodes:
+                row = user_id_to_row.get(n)
+                if row is not None:
+                    citations = row.get('citations_all', 10)
+                    name = row.get('name', n)
+                else:
+                    citations = 10
+                    name = n
+                node_citations[n] = citations
+                node_labels[n] = name
+
+            # --- Export to Gephi (GEXF) ---
+
+            import io
+            gexf_bytes = None
+            try:
+                color_map_rgb = {
+                    0: {'r': 255, 'g': 0, 'b': 0, 'a': 1.0},      # red
+                    1: {'r': 0, 'g': 102, 'b': 255, 'a': 1.0},     # blue
+                    2: {'r': 0, 'g': 153, 'b': 51, 'a': 1.0},      # green
+                    3: {'r': 255, 'g': 153, 'b': 0, 'a': 1.0}      # orange
+                }
+                for n in subG.nodes:
+                    size = 10 + (np.log1p(node_citations.get(n, 10)) if node_citations.get(n, 10) > 0 else 1) * 2.5
+                    depth = node_depth.get(n, 3)
+                    color = color_map_rgb.get(depth, {'r': 128, 'g': 128, 'b': 128, 'a': 1.0})
+                    subG.nodes[n]['label'] = node_labels.get(n, str(n))
+                    subG.nodes[n]['size'] = float(size)
+                    subG.nodes[n]['viz'] = {
+                        'size': float(size),
+                        'color': color
+                    }
+                gexf_io = io.BytesIO()
+                nx.write_gexf(subG, gexf_io)
+                gexf_bytes = gexf_io.getvalue()
+            except Exception as e:
+                st.warning(f"Could not export GEXF: {e}")
+            if gexf_bytes:
+                st.download_button(
+                    label="Export Network for Gephi (.gexf)",
+                    data=gexf_bytes,
+                    file_name="author_network.gexf",
+                    mime="application/octet-stream"
+                )
+else:
+    st.info("Profiles file not found. Cannot build network graph.")
