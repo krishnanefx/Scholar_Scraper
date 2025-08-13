@@ -1,3 +1,58 @@
+# === AUTOMATED BATCH SIZE/SAVE INTERVAL TESTING ===
+def benchmark_batch_settings(batch_sizes, save_intervals, test_profiles=200):
+    import copy
+    import time
+    results = []
+    for bsize in batch_sizes:
+        for sinterval in save_intervals:
+            print(f"\nTesting BATCH_SIZE={bsize}, SAVE_INTERVAL={sinterval}...")
+            # Set globals
+            global BATCH_SIZE, SAVE_INTERVAL
+            BATCH_SIZE = bsize
+            SAVE_INTERVAL = sinterval
+            # Prepare a small queue and profiles for test
+            queue = deque()
+            for i in range(test_profiles):
+                queue.append((SEED_USER_ID, 0, None))
+            all_profiles = []
+            visited_depths = {}
+            # Initialize driver for each test
+            drv = get_driver()
+            start = time.time()
+            try:
+                crawl_bfs_resume(drv, queue, all_profiles, visited_depths, force=True)
+            except Exception as e:
+                print(f"Error: {e}")
+                drv.quit()
+                continue
+            elapsed = time.time() - start
+            throughput = len(all_profiles) / elapsed if elapsed > 0 else 0
+            print(f"BATCH_SIZE={bsize}, SAVE_INTERVAL={sinterval} | Time: {elapsed:.2f}s | Profiles: {len(all_profiles)} | Throughput: {throughput:.2f} profiles/sec")
+            results.append((bsize, sinterval, elapsed, throughput))
+            drv.quit()
+    # Find best config
+    if results:
+        best = max(results, key=lambda x: x[3])
+        print(f"\nBest config: BATCH_SIZE={best[0]}, SAVE_INTERVAL={best[1]} | Throughput: {best[3]:.2f} profiles/sec")
+    else:
+        print("No successful runs. Please check for errors in your test setup.")
+
+import asyncio
+import time
+import aiohttp
+import joblib
+from functools import lru_cache
+# === CACHING SETUP ===
+WIKI_CACHE_PATH = "wiki_lookup_cache.joblib"
+FUZZY_CACHE_PATH = "fuzzy_match_cache.joblib"
+try:
+    wiki_cache = joblib.load(WIKI_CACHE_PATH)
+except Exception:
+    wiki_cache = {}
+try:
+    fuzzy_cache = joblib.load(FUZZY_CACHE_PATH)
+except Exception:
+    fuzzy_cache = {}
 import requests
 import mwparserfromhell
 import re
@@ -71,6 +126,7 @@ topic_labels = [
 
 researcher_candidate_labels = researcher_labels + non_research_labels
 
+
 # === CONFIG ===
 SAVE_EVERY = 5
 MAX_CRAWL_DEPTH = 800000000000
@@ -80,10 +136,19 @@ GRAPH_GRAPHML = "coauthor_network_progressssss.graphml"
 QUEUE_FILE = "queue.txt"
 MAX_CRAWL_SECONDS = 3600000
 FUZZY_CACHE_PATH = "fuzzy_match_cache.json"
+
 ICLR_PARQUET_PATH = 'iclr_2020_2025_combined_data.parquet'
 NEURIPS_PARQUET_PATH = 'neurips_2020_2024_combined_data.parquet'
 FUZZY_RUN_INTERVAL = 5
 phrase_to_topics = {}
+
+# === BATCH TUNING ===
+BATCH_SIZE = 100  # Number of profiles to process per batch
+SAVE_INTERVAL = 500  # Number of processed profiles before saving progress
+
+# Load conference data once for fuzzy matching (module scope)
+iclr_df = pd.read_parquet(ICLR_PARQUET_PATH) if os.path.exists(ICLR_PARQUET_PATH) else None
+neurips_df = pd.read_parquet(NEURIPS_PARQUET_PATH) if os.path.exists(NEURIPS_PARQUET_PATH) else None
 
 EXPECTED_COLUMNS = [
     "user_id", "name", "position", "email", "homepage", "country", "institution", "research_interests",
@@ -272,6 +337,8 @@ def classify_researcher_from_summary(summary):
     except Exception:
         return False
 
+classify_researcher_from_summary = lru_cache(maxsize=256)(classify_researcher_from_summary)
+
 def tag_interest_phrases(phrases):
     """Tag interest phrases with research topics"""
     start = time.time()
@@ -343,42 +410,54 @@ def fuzzy_wikipedia_search(name, threshold=0.90, max_results=5):
             best_score, best_match = score, title
     return best_match if best_score >= threshold else None
 
-def get_wikipedia_summary(page_title):
-    """Get Wikipedia page summary"""
-    S = requests.Session()
-    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{page_title}"
-    S.headers.update({'User-Agent': 'Mozilla/5.0 (compatible; WikiInfoBot/1.0)'})
-    response = S.get(url)
-    return data.get("extract", "") if response.status_code == 200 and (data := response.json()) else ""
 
-def get_selected_infobox_fields(page_title, fields_to_extract):
-    """Extract specific fields from Wikipedia infobox"""
-    S = requests.Session()
-    S.headers.update({'User-Agent': 'Mozilla/5.0 (compatible; WikiInfoBot/1.0)'})
+# === ASYNC WIKIPEDIA FUNCTIONS ===
+async def async_get_wikipedia_summary(session, page_title):
+    """Async get Wikipedia page summary"""
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{page_title}"
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; WikiInfoBot/1.0)'}
+    for _ in range(3):
+        try:
+            async with session.get(url, headers=headers, timeout=30) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("extract", "")
+                else:
+                    await asyncio.sleep(1)
+        except asyncio.TimeoutError:
+            await asyncio.sleep(2)
+        except Exception:
+            await asyncio.sleep(1)
+    return ""
+
+
+async def async_get_selected_infobox_fields(session, page_title, fields_to_extract):
+    """Async extract specific fields from Wikipedia infobox"""
     URL = "https://en.wikipedia.org/w/api.php"
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; WikiInfoBot/1.0)'}
     PARAMS = {"action": "query", "format": "json", "titles": page_title,
               "prop": "revisions", "rvprop": "content", "rvslots": "main"}
-    
-    for _ in range(3):  # Retry logic
-        response = S.get(url=URL, params=PARAMS)
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                break
-            except Exception:
-                time.sleep(1)
+    for _ in range(3):
+        try:
+            async with session.get(URL, params=PARAMS, headers=headers, timeout=30) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    break
+                else:
+                    await asyncio.sleep(1)
+        except asyncio.TimeoutError:
+            await asyncio.sleep(2)
+        except Exception:
+            await asyncio.sleep(1)
     else:
         return None, None
-    
     page = next(iter(data['query']['pages'].values()))
     if "missing" in page or 'revisions' not in page:
         return None, None
-    
     matched_title = page.get('title', page_title)
     wikitext = page['revisions'][0]['slots']['main']['*']
     wikicode = mwparserfromhell.parse(wikitext)
     infobox = next((t for t in wikicode.filter_templates() if t.name.lower().strip().startswith("infobox")), None)
-    
     extracted = {}
     if infobox:
         for key in fields_to_extract:
@@ -389,35 +468,38 @@ def get_selected_infobox_fields(page_title, fields_to_extract):
                 extracted[key] = ""
     else:
         extracted = {k: "" for k in fields_to_extract}
-    
     return extracted, matched_title
 
-def get_author_wikipedia_info(author_name):
-    """Get comprehensive Wikipedia info for an author"""
+
+async def async_get_author_wikipedia_info(session, author_name):
+    """Async get comprehensive Wikipedia info for an author"""
     fields = ["birth_name", "name", "birth_date", "birth_place", "death_date", "death_place",
               "fields", "work_institution", "alma_mater", "notable_students", "thesis_title",
               "thesis_year", "thesis_url", "known_for", "awards"]
-
+    # Persistent cache lookup
+    if author_name in wiki_cache:
+        return wiki_cache[author_name]
     matched_title = fuzzy_wikipedia_search(author_name)
     if matched_title is None:
         info = {k: "" for k in fields}
-        info.update({"deceased": False, "wiki_summary": "", "is_researcher_ml": False, "matched_title": None})
+        info.update({"deceased": "False", "wiki_summary": "", "is_researcher_ml": "False", "matched_title": ""})
+        wiki_cache[author_name] = info
+        joblib.dump(wiki_cache, WIKI_CACHE_PATH)
         return info
-
-    info, matched_title = get_selected_infobox_fields(matched_title, fields)
+    info, matched_title = await async_get_selected_infobox_fields(session, matched_title, fields)
     if info is None:
         info = {k: "" for k in fields}
-        info["deceased"] = False
+        info["deceased"] = "False"
     else:
-        info["deceased"] = bool(info.get("death_date"))
-    
-    summary = get_wikipedia_summary(matched_title)
+        info["deceased"] = str(bool(info.get("death_date")))
+    summary = await async_get_wikipedia_summary(session, matched_title)
     info.update({
         "wiki_summary": summary,
-        "is_researcher_ml": classify_researcher_from_summary(summary),
-        "matched_title": matched_title
+        "is_researcher_ml": str(classify_researcher_from_summary(summary)),
+        "matched_title": matched_title or ""
     })
-    
+    wiki_cache[author_name] = info
+    joblib.dump(wiki_cache, WIKI_CACHE_PATH)
     return info
 
 # === UTILITY FUNCTIONS ===
@@ -472,17 +554,26 @@ def get_institution_from_email(email_field):
 
 def extract_profile(driver, user_id, depth, parent_id=None):
     start = time.time()
-    """Extract complete profile from Google Scholar"""
+    """Extract complete profile from Google Scholar, using requests+BeautifulSoup if possible, else fallback to Selenium."""
     url = f"https://scholar.google.com/citations?hl=en&user={user_id}"
-    driver.get(url)
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; ScholarScraper/1.0)'}
     try:
-        WebDriverWait(driver, 2).until(
-            EC.presence_of_element_located((By.ID, "gsc_prf_in"))
-        )
-    except Exception as e:
-        print(f"⚠️ Wait timeout for {url} — {e}")
-        time.sleep(2)  # Fallback sleep if Google Scholar is slow
-    soup = BeautifulSoup(driver.page_source, "html.parser")
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200 and 'gsc_prf_in' in resp.text:
+            soup = BeautifulSoup(resp.text, "html.parser")
+        else:
+            raise Exception("Profile not found or blocked")
+    except Exception:
+        # Fallback to Selenium if requests fails or is blocked
+        driver.get(url)
+        try:
+            WebDriverWait(driver, 1).until(
+                EC.presence_of_element_located((By.ID, "gsc_prf_in"))
+            )
+        except Exception as e:
+            print(f"⚠️ Wait timeout for {url} — {e}")
+            time.sleep(0.5)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
 
     # Extract basic info
     name_tag = soup.select_one("#gsc_prf_in")
@@ -503,7 +594,8 @@ def extract_profile(driver, user_id, depth, parent_id=None):
     homepage_url = ""
     if email_tag:
         homepage_link = email_tag.find("a", string="Homepage") or email_tag.find("a")
-        if homepage_link and homepage_link.get_text(strip=True).lower() == "homepage":
+        from bs4.element import Tag
+        if homepage_link and isinstance(homepage_link, Tag) and homepage_link.get_text(strip=True).lower() == "homepage":
             homepage_url = homepage_link.get("href", "")
 
     # Extract metrics
@@ -520,7 +612,9 @@ def extract_profile(driver, user_id, depth, parent_id=None):
     coauthors = []
     for a_tag in soup.select(".gsc_rsb_aa .gsc_rsb_a_desc a"):
         href = a_tag.get("href", "")
-        if "user=" in href:
+        if isinstance(href, list):
+            href = href[0] if href else ""
+        if isinstance(href, str) and "user=" in href:
             co_id = href.split("user=")[1].split("&")[0]
             if co_id != user_id:
                 coauthors.append(co_id)
@@ -599,7 +693,7 @@ def enqueue_user(queue, user_id, depth, parent_id=None, visited_ids=None, prepen
 def fuzzy_match_conference_participation(profile, conf_name, df, name_col='Author', inst_col='Institution', threshold=85):
     """Match profile to conference participation"""
     authors = df[name_col].dropna().unique()
-    authors_lower = [a.lower() for a in authors]
+    authors_lower = pd.Series(authors).str.lower().values
 
     profile_name = profile.get("name", "").lower()
     if not profile_name:
@@ -607,36 +701,47 @@ def fuzzy_match_conference_participation(profile, conf_name, df, name_col='Autho
         profile[f"{conf_name}_Institution"] = ""
         return
 
+    # Persistent cache for fuzzy match
+    cache_key = f"{conf_name}:{profile_name}"
+    if cache_key in fuzzy_cache:
+        match, score, matched_institution = fuzzy_cache[cache_key]
+        if float(score) >= threshold:
+            profile[f"Participated_in_{conf_name}"] = True
+            profile[f"{conf_name}_Institution"] = matched_institution
+        else:
+            profile[f"Participated_in_{conf_name}"] = False
+            profile[f"{conf_name}_Institution"] = ""
+        return
+
     match, score = process.extractOne(profile_name, authors_lower, scorer=fuzz.token_sort_ratio)
     if score >= threshold:
-        match_idx = authors_lower.index(match)
-        matched_author = authors[match_idx]
+        # Vectorized lookup for matched institution
+        mask = (authors_lower == match)
+        matched_author = authors[mask][0] if mask.any() else ""
         if inst_col in df.columns:
-            inst_values = df[df[name_col] == matched_author][inst_col].dropna()
+            inst_values = df.loc[df[name_col] == matched_author, inst_col].dropna()
             matched_institution = inst_values.iloc[0] if not inst_values.empty else ""
         else:
             matched_institution = ""
         profile[f"Participated_in_{conf_name}"] = True
         profile[f"{conf_name}_Institution"] = matched_institution
     else:
+        matched_institution = ""
         profile[f"Participated_in_{conf_name}"] = False
         profile[f"{conf_name}_Institution"] = ""
+    fuzzy_cache[cache_key] = (str(match), str(score), str(matched_institution))
+    joblib.dump(fuzzy_cache, FUZZY_CACHE_PATH)
 
 def run_fuzzy_matching_single(profile):
     """Run fuzzy matching for a single profile"""
     if profile.get("Fuzzy_Matched"):
         return
 
-    # ICLR matching
-    if os.path.exists(ICLR_PARQUET_PATH):
-        iclr_df = pd.read_parquet(ICLR_PARQUET_PATH)
+    # Use preloaded DataFrames for fuzzy matching
+    if iclr_df is not None:
         fuzzy_match_conference_participation(profile, "ICLR", iclr_df)
-
-    # NeurIPS matching
-    if os.path.exists(NEURIPS_PARQUET_PATH):
-        neurips_df = pd.read_parquet(NEURIPS_PARQUET_PATH)
+    if neurips_df is not None:
         fuzzy_match_conference_participation(profile, "NeurIPS", neurips_df)
-
     profile["Fuzzy_Matched"] = True
 
 # === PROGRESS LOADING ===
@@ -682,32 +787,43 @@ def get_coauthors_from_profile(driver, user_id):
     coauthors = []
     for a_tag in soup.select(".gsc_rsb_aa .gsc_rsb_a_desc a"):
         href = a_tag.get("href", "")
-        if "user=" in href:
+        if isinstance(href, list):
+            href = href[0] if href else ""
+        if isinstance(href, str) and "user=" in href:
             co_id = href.split("user=")[1].split("&")[0]
             coauthors.append(co_id)
     return coauthors
 
-def enrich_profile(profile):
+
+def enrich_profile_base(profile, wiki_info):
     try:
         # Tag interests
         if "interest_phrases" in profile and profile["interest_phrases"]:
             profile["topic_tags"] = tag_interest_phrases(profile["interest_phrases"])
         else:
             profile["topic_tags"] = []
-
         # Fuzzy matching
         run_fuzzy_matching_single(profile)
-
-        # Wikipedia info
-        wiki_info = get_author_wikipedia_info(profile.get("name", ""))
+        # Wikipedia info (already fetched)
         profile.update({
             f"wiki_{k}": v for k, v in wiki_info.items()
         })
-
         return profile
     except Exception as e:
         print(f"❌ Enrichment failed for {profile.get('user_id')}: {e}")
-        return profile  # Return even if partial
+        return profile
+
+# Batch async Wikipedia enrichment
+async def batch_enrich_profiles(profiles):
+    async with aiohttp.ClientSession() as session:
+        tasks = [async_get_author_wikipedia_info(session, p.get("name", "")) for p in profiles]
+        wiki_infos = await asyncio.gather(*tasks)
+    # Now do the rest of enrichment (topic tags, fuzzy matching) in parallel
+    from concurrent.futures import ThreadPoolExecutor
+    enriched = []
+    with ThreadPoolExecutor() as executor:
+        enriched = list(executor.map(lambda args: enrich_profile_base(*args), zip(profiles, wiki_infos)))
+    return enriched
 
 # === MAIN CRAWLING FUNCTION ===
 def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
@@ -725,8 +841,6 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
             visited_depths.pop(uid, None)
 
     profile_batch = []
-    BATCH_SIZE = 20
-    SAVE_INTERVAL = 100
     batch_since_save = 0
 
     # Convert visited_depths to set for O(1) lookup
@@ -754,48 +868,47 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
                     pass
             last_insert_check = time.time()
 
-        user_id, depth, parent_id = queue.popleft()
-        depth = int(depth)
-
-        if time.time() - start_time > MAX_CRAWL_SECONDS:
-            break
-
-        if not force and user_id in visited_set:
+        # Parallelize extraction of multiple profiles at once
+        batch_items = []
+        while queue and len(batch_items) < BATCH_SIZE:
+            user_id, depth, parent_id = queue.popleft()
+            depth = int(depth)
+            if not force and user_id in visited_set:
+                continue
+            batch_items.append((user_id, depth, parent_id))
+        if not batch_items:
             continue
-
-        try:
-            profile = extract_profile(driver, user_id, depth, parent_id)
-            visited_depths[user_id] = depth
-            visited_set.add(user_id)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor() as executor:
+            profiles = list(executor.map(lambda args: extract_profile(driver, *args), batch_items))
+        for profile in profiles:
+            visited_depths[profile["user_id"]] = profile["search_depth"]
+            visited_set.add(profile["user_id"])
             profile_batch.append(profile)
             total_scraped += 1
-
             # Enqueue coauthors
             for co_id in profile.get("coauthors", [])[:20]:
-                if co_id not in visited_set and co_id != user_id:
-                    enqueue_user(queue, co_id, depth + 1, user_id)
-
-            # Process batch if size reached
-            if len(profile_batch) >= BATCH_SIZE:
-                with Pool(max(1, cpu_count()-1)) as pool:
-                    enriched_profiles = pool.map(enrich_profile, profile_batch)
-                all_profiles.extend(enriched_profiles)
-                profile_batch = []
-                batch_since_save += len(enriched_profiles)
-                print(f"✅ Processed {total_scraped} profiles so far")
-                progress_bar.update(len(enriched_profiles))
-                if batch_since_save >= SAVE_INTERVAL:
-                    save_queue(queue)
-                    save_progress(all_profiles)
-                    batch_since_save = 0
-
-        except Exception as e:
-            print(f"❌ Error scraping {user_id}: {e}")
+                if co_id not in visited_set and co_id != profile["user_id"]:
+                    enqueue_user(queue, co_id, profile["search_depth"] + 1, profile["user_id"])
+        # Process batch if size reached
+        if len(profile_batch) >= BATCH_SIZE:
+            batch_start = time.time()
+            enriched_profiles = asyncio.run(batch_enrich_profiles(profile_batch))
+            batch_time = time.time() - batch_start
+            all_profiles.extend(enriched_profiles)
+            profile_batch = []
+            batch_since_save += len(enriched_profiles)
+            print(f"✅ Processed {total_scraped} profiles so far | Batch size: {BATCH_SIZE} | Time: {batch_time:.2f}s")
+            progress_bar.update(len(enriched_profiles))
+            # Only save after each batch, not after every profile
+            if batch_since_save >= SAVE_INTERVAL:
+                save_queue(queue)
+                save_progress(all_profiles)
+                batch_since_save = 0
 
     # Flush leftover profiles after queue emptied
     if profile_batch:
-        with Pool(max(1, cpu_count()-1)) as pool:
-            enriched_profiles = pool.map(enrich_profile, profile_batch)
+        enriched_profiles = asyncio.run(batch_enrich_profiles(profile_batch))
         all_profiles.extend(enriched_profiles)
         profile_batch = []
         save_progress(all_profiles)
@@ -805,6 +918,8 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
 
 # === MAIN EXECUTION ===
 if __name__ == "__main__":
+    # Uncomment to run automated batch size/save interval benchmarking:
+    benchmark_batch_settings(batch_sizes=[25, 50, 100, 200], save_intervals=[25, 50, 100, 200], test_profiles=200)
     # Initialize globals
     phrase_to_topics = {}
     driver = get_driver()
