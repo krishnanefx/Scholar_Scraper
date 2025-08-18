@@ -150,7 +150,7 @@ def main():
     # Load scholar profiles database
     print("Loading scholar profiles database...")
     try:
-        scholar_profiles = pd.read_csv('scholar_profiles_progressssss.csv', low_memory=False)
+        scholar_profiles = pd.read_csv('../data/processed/scholar_profiles_progressssss.csv', low_memory=False)
         print(f"✅ Loaded {len(scholar_profiles)} scholar profiles")
     except Exception as e:
         print(f"❌ Error loading scholar profiles: {e}")
@@ -161,7 +161,7 @@ def main():
     
     # AAAI
     try:
-        aaai_preds = pd.read_csv('AAAI scraper/aaai_2026_predictions.csv')
+        aaai_preds = pd.read_csv('../data/predictions/aaai_2026_predictions.csv')
         aaai_participants = aaai_preds[aaai_preds['will_participate_2026'] == 1]
         conferences_data['AAAI'] = aaai_participants
         print(f"✅ AAAI 2026 predictions loaded: {len(aaai_participants)} predicted participants")
@@ -171,7 +171,7 @@ def main():
     
     # NeurIPS
     try:
-        neurips_preds = pd.read_csv('neurips_2026_predictions.csv')
+        neurips_preds = pd.read_csv('../data/predictions/neurips_2026_predictions.csv')
         neurips_participants = neurips_preds[neurips_preds['will_participate_2026'] == 1]
         conferences_data['NeurIPS'] = neurips_participants
         print(f"✅ NeurIPS 2026 predictions loaded: {len(neurips_participants)} predicted participants")
@@ -181,7 +181,7 @@ def main():
     
     # ICLR
     try:
-        iclr_preds = pd.read_csv('iclr_2026_predictions.csv')
+        iclr_preds = pd.read_csv('../data/predictions/iclr_2026_predictions.csv')
         iclr_participants = iclr_preds[iclr_preds['will_participate_2026'] == 1]
         conferences_data['ICLR'] = iclr_participants
         print(f"✅ ICLR 2026 predictions loaded: {len(iclr_participants)} predicted participants")
@@ -213,7 +213,7 @@ def main():
             all_unmatched_results.extend(unmatched_results)
     
     # Create Excel file with results
-    excel_filename = '2026_Conference_Predictions_with_Scholar_Profiles.xlsx'
+    excel_filename = '../outputs/2026_Conference_Predictions_with_Scholar_Profiles.xlsx'
     
     with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
         

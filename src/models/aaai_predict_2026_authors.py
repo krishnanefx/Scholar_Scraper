@@ -128,13 +128,12 @@ def adjust_probability_with_logic(row, raw_prob):
 print("Loading AAAI data...")
 print(f"Current working directory: {os.getcwd()}")
 
-if os.path.exists('aaai25_papers_authors_split.csv'):
-    df = pd.read_csv('aaai25_papers_authors_split.csv')
-elif os.path.exists('AAAI scraper/aaai25_papers_authors_split.csv'):
-    df = pd.read_csv('AAAI scraper/aaai25_papers_authors_split.csv')
-else:
-    print("Error: Could not find aaai25_papers_authors_split.csv")
+data_path = '../../data/raw/aaai25_papers_authors_split.csv'
+if not os.path.exists(data_path):
+    print("Error: Could not find aaai25_papers_authors_split.csv in data/raw/")
     exit(1)
+
+df = pd.read_csv(data_path)
 
 # Data preprocessing
 df['author'] = df['author'].fillna('').apply(normalize_author)
@@ -357,17 +356,11 @@ results_df = results_df.sort_values('participation_probability', ascending=False
 results_df['rank'] = range(1, len(results_df) + 1)
 
 # Save results to correct location
-output_path = 'aaai_2026_predictions.csv'
-if not os.path.exists('aaai25_papers_authors_split.csv'):
-    # We're running from parent directory
-    output_path = 'AAAI scraper/aaai_2026_predictions.csv'
-
+output_path = '../../data/predictions/aaai_2026_predictions.csv'
 results_df.to_csv(output_path, index=False)
 
 # Save model
-model_path = 'aaai_participation_model.pkl'
-if not os.path.exists('aaai25_papers_authors_split.csv'):
-    model_path = 'AAAI scraper/aaai_participation_model.pkl'
+model_path = '../../data/processed/aaai_participation_model.pkl'
 
 joblib.dump(calibrated_final, model_path)
 

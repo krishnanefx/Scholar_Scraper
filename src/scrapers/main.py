@@ -43,8 +43,8 @@ import aiohttp
 import joblib
 from functools import lru_cache
 # === CACHING SETUP ===
-WIKI_CACHE_PATH = "wiki_lookup_cache.joblib"
-FUZZY_CACHE_PATH = "fuzzy_match_cache.joblib"
+WIKI_CACHE_PATH = "../../cache/wiki_lookup_cache.joblib"
+FUZZY_CACHE_PATH = "../../cache/fuzzy_match_cache.json"
 try:
     wiki_cache = joblib.load(WIKI_CACHE_PATH)
 except Exception:
@@ -131,14 +131,15 @@ researcher_candidate_labels = researcher_labels + non_research_labels
 SAVE_EVERY = 5
 MAX_CRAWL_DEPTH = 800000000000
 SEED_USER_ID = "kukA0LcAAAAJ"  # Yoshua Bengio
-PROGRESS_CSV = "scholar_profiles_progressssss.csv"
-GRAPH_GRAPHML = "coauthor_network_progressssss.graphml"
-QUEUE_FILE = "queue.txt"
+DATA_FILE = "../../data/processed/scholar_profiles_updated.csv"
+PROGRESS_CSV = "../../data/processed/scholar_profiles_updated.csv"
+GRAPH_GRAPHML = "../../outputs/coauthor_network_progress.graphml"
+QUEUE_FILE = "../../cache/queue.txt"
 MAX_CRAWL_SECONDS = 3600000
-FUZZY_CACHE_PATH = "fuzzy_match_cache.json"
+FUZZY_CACHE_PATH = "../../cache/fuzzy_match_cache.json"
 
-ICLR_PARQUET_PATH = 'iclr_2020_2025_combined_data.parquet'
-NEURIPS_PARQUET_PATH = 'neurips_2020_2024_combined_data.parquet'
+ICLR_PARQUET_PATH = '../../data/raw/iclr_2020_2025_combined_data.parquet'
+NEURIPS_PARQUET_PATH = '../../data/raw/neurips_2020_2024_combined_data.parquet'
 FUZZY_RUN_INTERVAL = 5
 phrase_to_topics = {}
 
@@ -830,7 +831,7 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
     """Main BFS crawling function with batched multiprocessing enrichment"""
     start_time = time.time()
     total_scraped = 0
-    INSERT_FILE = "queue_insert.jsonl"
+    INSERT_FILE = "../../cache/queue_insert.jsonl"
     INSERT_CHECK_INTERVAL = 30
     last_insert_check = time.time()
 

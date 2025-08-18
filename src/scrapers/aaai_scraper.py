@@ -10,7 +10,7 @@ headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 }
 
-output_file = "aaai25_papers_authors_split.csv"
+output_file = "../../data/raw/aaai25_papers_authors_split.csv"
 with open(output_file, "w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=["title", "article_link", "author", "pdf_link", "year", "issue_number"])
     writer.writeheader()

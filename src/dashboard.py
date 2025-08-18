@@ -16,8 +16,8 @@ st.set_page_config(page_title="AI Researcher Database", page_icon="📚", layout
 
 st.title("📚 Scholar Queue Enqueuer")
 # Define the insert file (NOT the queue file)
-INSERT_FILE = "queue_insert.jsonl"
-PROFILES_FILE = "scholar_profiles_progressssss.csv"
+INSERT_FILE = "../cache/queue_insert.jsonl"
+PROFILES_FILE = "../data/processed/scholar_profiles_updated.csv"
 
 
 st.markdown("Enter one or more Google Scholar **user IDs** below to enqueue (non-destructively):")

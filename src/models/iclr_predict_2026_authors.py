@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-NeurIPS 2026 Author Participation Prediction Model
-Adapted from AAAI prediction model to work with NeurIPS dataset
+ICLR 2026 Author Participation Prediction Model
+Adapted from AAAI prediction model to work with ICLR dataset
 """
 
 from sklearn.calibration import CalibratedClassifierCV
@@ -121,12 +121,12 @@ def get_year_features(years, all_years):
     }
 
 def main():
-    print("=== NeurIPS 2026 Author Participation Prediction ===")
+    print("=== ICLR 2026 Author Participation Prediction ===")
     
-    # Load the data directly from parquet
-    print("Loading NeurIPS dataset from parquet...")
-    df = pd.read_parquet('neurips_2020_2024_combined_data.parquet')
-    print(f"Loaded {len(df)} records from NeurIPS parquet dataset")
+        # Load ICLR data
+    print("Loading ICLR data...")
+    df = pd.read_parquet('../../data/raw/iclr_2020_2025_combined_data.parquet')
+    print(f"Loaded {len(df)} records from ICLR parquet dataset")
     
     # Data Quality: Clean and normalize author names
     df['Author'] = df['Author'].fillna('').apply(normalize_author)
@@ -328,10 +328,10 @@ def main():
         'probability': 'participation_probability'
     })
     
-    output_file = 'neurips_2026_predictions.csv'
+    output_file = '../../data/predictions/iclr_2026_predictions.csv'
     results_to_save.to_csv(output_file, index=False)
     
-    print(f"\n=== NeurIPS 2026 Predictions Complete ===")
+    print(f"\n=== ICLR 2026 Predictions Complete ===")
     print(f"Predictions saved to: {output_file}")
     print(f"Total authors analyzed: {len(author_full)}")
     print(f"Authors predicted to participate: {results_to_save['will_participate_2026'].sum()}")
@@ -343,8 +343,8 @@ def main():
         print(f"{row['predicted_author']}: {row['participation_probability']:.3f} ({row['confidence_percent']:.1f}% confidence, {row['num_participations']} past participations)")
     
     # Save the model
-    joblib.dump(ensemble_final, 'neurips_participation_model.pkl')
-    print(f"\nModel saved as: neurips_participation_model.pkl")
+    joblib.dump(ensemble_final, '../../data/processed/iclr_participation_model.pkl')
+    print(f"\nModel saved as: ../../data/processed/iclr_participation_model.pkl")
 
 if __name__ == "__main__":
     main()
