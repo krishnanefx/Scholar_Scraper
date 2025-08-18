@@ -18,7 +18,8 @@ with open(output_file, "w", newline="", encoding="utf-8") as f:
     for issue_num in range(1, 1001):
         url = f"https://ojs.aaai.org/index.php/AAAI/issue/view/{issue_num}"
         try:
-            response = requests.get(url, headers=headers, timeout=15)
+            # Use a tuple for timeout: (connect timeout, read timeout)
+            response = requests.get(url, headers=headers, timeout=(5, 30))
             if response.status_code != 200:
                 print(f"Issue {issue_num}: Not found (status {response.status_code})")
                 continue

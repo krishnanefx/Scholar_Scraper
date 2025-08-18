@@ -7,7 +7,9 @@ tqdm
 pandas
 numpy
 tldextract
+requests
 beautifulsoup4
+scikit-learn
 selenium
 networkx
 fuzzywuzzy

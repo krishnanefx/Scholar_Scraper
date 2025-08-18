@@ -1,3 +1,10 @@
+from sklearn.calibration import CalibratedClassifierCV
+def clean_features(X):
+    """Replace NaN, inf, -inf with 0 and clip extreme values."""
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    # Optionally, clip to a reasonable range to avoid overflows
+    X = np.clip(X, -1e6, 1e6)
+    return X
 import matplotlib.pyplot as plt
 
 import pandas as pd
@@ -5,10 +12,12 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import classification_report, mean_squared_error, roc_auc_score
+from sklearn.metrics import classification_report, mean_squared_error, roc_auc_score, precision_score, recall_score, f1_score, mean_absolute_error
+from sklearn.ensemble import HistGradientBoostingRegressor
 from collections import defaultdict, Counter
 import re
 from sklearn.preprocessing import StandardScaler
+from sklearn.calibration import calibration_curve
 
 
 # Load the data
@@ -33,55 +42,91 @@ df = df.dropna(subset=['year'])
 df['year'] = df['year'].astype(int)
 
 
+
 # Feature engineering: richer author participation history
 
-all_years = sorted(df['year'].unique())
-min_year, max_year = min(all_years), max(all_years)
-base_features = ['num_participations', 'last_year', 'first_year', 'max_consecutive_years', 'years_since_last', 'years_since_first', 'exp_decay_sum', 'markov_prob']
+all_years_full = sorted(df['year'].unique())
+min_year, max_year = min(all_years_full), max(all_years_full)
+target_year = max_year
+# For feature engineering, exclude the target year (t) so features only use history up to t-1
+all_years = [y for y in all_years_full if y < target_year]
+base_features = [
+    'num_participations',
+    'max_consecutive_years',
+    'years_since_last',
+    'years_since_first',
+    'exp_decay_sum',
+    'markov_prob',
+    'participation_rate',
+    'max_gap',
+    'mean_gap',
+    'streak_length'
+]
 
 def get_year_features(years, all_years):
     years_set = set(years)
-    # Participation in each year
+    # Participation in each year (lagged: only up to t-1)
     year_feats = {f'appeared_{y}': int(y in years_set) for y in all_years}
-    # Recent streak: how many consecutive years up to the last year
-    sorted_years = sorted(years)
+    # Only use years < max(all_years) for lagged features
+    past_years_attended = sorted([y for y in years if y in all_years])
+    # Streak features (lagged)
     streak = 1
     max_streak = 1
-    for i in range(1, len(sorted_years)):
-        if sorted_years[i] == sorted_years[i-1] + 1:
+    streak_length = 1
+    for i in range(1, len(past_years_attended)):
+        if past_years_attended[i] == past_years_attended[i-1] + 1:
             streak += 1
             max_streak = max(max_streak, streak)
         else:
             streak = 1
-    # Years since first/last participation
-    last_year = sorted_years[-1]
-    first_year = sorted_years[0]
-    years_since_last = max_year - last_year
-    years_since_first = max_year - first_year
-    # Markov: transition probabilities (simple)
+    streak_length = max_streak
+    # Lagged years since first/last participation (exclude target year)
+    if past_years_attended:
+        last_year = past_years_attended[-1]
+        first_year = past_years_attended[0]
+        years_since_last = max(all_years) - last_year
+        years_since_first = max(all_years) - first_year
+    else:
+        last_year = first_year = years_since_last = years_since_first = 0
+    # Participation rate (lagged)
+    active_years = last_year - first_year + 1 if last_year > first_year else 1
+    participation_rate = len(past_years_attended) / active_years if active_years > 0 else 0
+    # Gap features (lagged)
+    gaps = [past_years_attended[i] - past_years_attended[i-1] - 1 for i in range(1, len(past_years_attended))]
+    max_gap = max(gaps) if gaps else 0
+    mean_gap = np.mean(gaps) if gaps else 0
+    # Markov: transition probabilities (simple, lagged)
     transitions = Counter()
-    for i in range(1, len(sorted_years)):
-        transitions[(sorted_years[i-1], sorted_years[i])] += 1
-    # Temporal recency: exponential decay sum
+    for i in range(1, len(past_years_attended)):
+        transitions[(past_years_attended[i-1], past_years_attended[i])] += 1
+    # Temporal recency: exponential decay sum (lagged)
     decay = 0.5  # You can tune this
-    exp_decay_sum = sum(np.exp(-decay * (max(all_years) - y)) for y in years)
-    # Markov: probability of participating given previous year
+    exp_decay_sum = sum(np.exp(-decay * (max(all_years) - y)) for y in past_years_attended)
+    # Markov: probability of participating given previous year (lagged)
     markov_prob = 0.0
-    if len(years) > 1:
+    if len(past_years_attended) > 1:
         transitions_count = 0
-        for i in range(1, len(years)):
-            if years[i] == years[i-1] + 1:
+        for i in range(1, len(past_years_attended)):
+            if past_years_attended[i] == past_years_attended[i-1] + 1:
                 transitions_count += 1
-        markov_prob = transitions_count / (len(years) - 1)
+        markov_prob = transitions_count / (len(past_years_attended) - 1)
+    career_length = last_year - first_year + 1 if last_year >= first_year else 1
+    normalized_participation_rate = len(past_years_attended) / career_length if career_length > 0 else 0
     return {
-        'num_participations': len(years),
+        'num_participations': len(past_years_attended),
         'last_year': last_year,
         'first_year': first_year,
+        'career_length': career_length,
+        'normalized_participation_rate': normalized_participation_rate,
         'max_consecutive_years': max_streak,
         'years_since_last': years_since_last,
         'years_since_first': years_since_first,
         'exp_decay_sum': exp_decay_sum,
         'markov_prob': markov_prob,
+        'participation_rate': participation_rate,
+        'max_gap': max_gap,
+        'mean_gap': mean_gap,
+        'streak_length': streak_length,
         **year_feats,
         'markov_transitions': dict(transitions)
     }
@@ -96,75 +141,102 @@ author_full = pd.concat([author_years['author'], author_feats_df], axis=1)
 # Time-based cross-validation: train on all years before, test on the next year
 
 # --- Validation split with confidence tracking ---
+
+# --- Per-author cross-validation for model evaluation ---
+from sklearn.model_selection import GroupKFold
+author_val_stats = {}  # author: {'correct': int, 'total': int, 'probas': [], 'truths': []}
 results = []
 confidence_lookup = {}
-for test_year in range(min_year+3, max_year+1):
-    train_years = [y for y in all_years if y < test_year]
-    feature_cols = [f'appeared_{y}' for y in train_years]
-    features = base_features + feature_cols
-    X_train = author_full[features].fillna(0)
-    y_train = author_full.get(f'appeared_{test_year}', 0)
-    X_test = X_train.copy()
-    y_test = y_train if isinstance(y_train, pd.Series) else pd.Series([y_train]*len(X_test), index=X_test.index)
 
-    if not isinstance(y_train, (pd.Series, np.ndarray)) or len(np.unique(y_train)) < 2:
-        print(f"[Skipping year {test_year}] Not enough class diversity in training labels.")
-        continue
+groups = author_full['author']
+gkf = GroupKFold(n_splits=5)
+author_val_stats = {}  # author: {'correct': int, 'total': int, 'probas': [], 'truths': []}
+results = []
+confidence_lookup = {}
+target_year = max_year
 
+# Before the GroupKFold split, create the target variable as a Series
+author_full['appeared_target'] = author_full['author'].isin(
+    df[df['year'] == target_year]['author']
+).astype(int)
+# Then use this for y in the split:
+fold_preds, fold_probas, fold_truths = [], [], []
+
+for fold_idx, (train_idx, test_idx) in enumerate(gkf.split(author_full, author_full['appeared_target'], groups)):
+    # Lag all yearly indicators: when predicting year t, only include features from years ≤ t-1
+    # Drop all binary year indicators for this experiment
+    features = base_features
+    X_train = author_full.iloc[train_idx][features].fillna(0)
+    y_train = author_full.iloc[train_idx]['appeared_target']
+    X_test = author_full.iloc[test_idx][features].fillna(0)
+    y_test = author_full.iloc[test_idx]['appeared_target']
+    # Print target distribution for each fold
+    print(f"Train target distribution: {np.bincount(y_train.astype(int)) if len(y_train) > 0 else 'empty'}")
+    print(f"Test target distribution: {np.bincount(y_test.astype(int)) if len(y_test) > 0 else 'empty'}")
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
+    X_train_scaled = clean_features(X_train_scaled)
     X_test_scaled = scaler.transform(X_test)
+    X_test_scaled = clean_features(X_test_scaled)
 
-    rf = RandomForestClassifier(random_state=42)
+    # Use only probabilistic models for probability estimates
     gb = GradientBoostingClassifier(random_state=42)
     lr = LogisticRegression(max_iter=5000, random_state=42)
-
-    rf_grid = {'n_estimators': [100, 200], 'max_depth': [None, 5]}
     gb_grid = {'n_estimators': [100, 200], 'learning_rate': [0.05, 0.1]}
     lr_grid = {'C': [0.1, 1, 10]}
-
-    rf_cv = GridSearchCV(rf, rf_grid, cv=3, n_jobs=-1)
     gb_cv = GridSearchCV(gb, gb_grid, cv=3, n_jobs=-1)
     lr_cv = GridSearchCV(lr, lr_grid, cv=3, n_jobs=-1)
-    rf_cv.fit(X_train_scaled, y_train)
     gb_cv.fit(X_train_scaled, y_train)
     lr_cv.fit(X_train_scaled, y_train)
 
     ensemble = VotingClassifier(estimators=[
-        ('rf', rf_cv.best_estimator_),
         ('gb', gb_cv.best_estimator_),
         ('lr', lr_cv.best_estimator_)
     ], voting='soft')
+
+    # Fit ensemble first, then calibrate using isotonic regression
     ensemble.fit(X_train_scaled, y_train)
-    y_pred = ensemble.predict(X_test_scaled)
-    if hasattr(ensemble, 'predict_proba') and len(ensemble.classes_) == 2:
-        y_proba = ensemble.predict_proba(X_test_scaled)[:, 1]
+    calibrated = CalibratedClassifierCV(ensemble, method='isotonic', cv='prefit')
+    calibrated.fit(X_train_scaled, y_train)
+    y_pred = calibrated.predict(X_test_scaled)
+    if hasattr(calibrated, 'predict_proba') and len(calibrated.classes_) == 2:
+        y_proba = calibrated.predict_proba(X_test_scaled)[:, 1]
     else:
-        single_class = ensemble.classes_[0]
+        single_class = calibrated.classes_[0]
         y_proba = np.full_like(y_test, fill_value=single_class, dtype=float)
+
+    # --- Metrics ---
     if len(np.unique(y_test)) == 2:
         auc = roc_auc_score(y_test, y_proba)
+        prec = precision_score(y_test, y_pred)
+        rec = recall_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
+        print(f"AUC: {auc:.3f}, Precision: {prec:.3f}, Recall: {rec:.3f}, F1: {f1:.3f}")
     else:
         auc = np.nan
-        print(f"[Warning] Only one class present in y_test for year {test_year}. ROC AUC is undefined.")
+        prec = rec = f1 = np.nan
+        print(f"[Warning] Only one class present in y_test for group split. ROC AUC is undefined.")
     report = classification_report(y_test, y_pred, output_dict=True)
-    results.append({'test_year': test_year, 'auc': auc, 'report': report})
-    print(f"Year {test_year} AUC: {auc if not np.isnan(auc) else 'undefined (one class)'}")
+    results.append({'auc': auc, 'precision': prec, 'recall': rec, 'f1': f1, 'report': report})
+    print(f"Group split AUC: {auc if not np.isnan(auc) else 'undefined (one class)'}")
     print(classification_report(y_test, y_pred))
 
-    # --- Track confidence by participation pattern ---
-    import collections.abc
-    if isinstance(y_pred, (np.ndarray, list, collections.abc.Sequence)) and len(y_pred) == len(y_test):
-        for i in range(len(y_pred)):
-            row = author_full.iloc[i]
-            pattern = (row['num_participations'], row['max_consecutive_years'])
-            pred = y_pred[i]
-            true = y_test.iloc[i]
-            if pattern not in confidence_lookup:
-                confidence_lookup[pattern] = {'correct': 0, 'total': 0}
-            if pred == true:
-                confidence_lookup[pattern]['correct'] += 1
-            confidence_lookup[pattern]['total'] += 1
+    # --- Calibration: reliability plot ---
+    prob_true, prob_pred = calibration_curve(y_test, y_proba, n_bins=10)
+    plt.figure(figsize=(4, 4))
+    plt.plot(prob_pred, prob_true, marker='o', label='Fold')
+    plt.plot([0, 1], [0, 1], linestyle='--', color='gray')
+    plt.xlabel('Mean predicted probability')
+    plt.ylabel('Fraction of positives')
+    plt.title('Reliability (Calibration) Curve')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # --- Store per-fold predictions and probabilities ---
+    fold_preds.extend(y_pred)
+    fold_probas.extend(y_proba)
+    fold_truths.extend(y_test)
 
 # Use ensemble for final prediction (train on all years up to max_year)
 predict_year = max_year + 1
@@ -173,80 +245,87 @@ feature_cols_pred = [f'appeared_{y}' for y in feature_years_pred]
 features_pred = base_features + feature_cols_pred
 X_pred = author_full[features_pred].fillna(0)
 
+
 # Scale features for final prediction
 scaler_final = StandardScaler()
 X_pred_scaled = scaler_final.fit_transform(X_pred)
+X_pred_scaled = clean_features(X_pred_scaled)
 
-rf_final = RandomForestClassifier(random_state=42, n_estimators=rf_cv.best_params_['n_estimators'], max_depth=rf_cv.best_params_['max_depth'])
-gb_final = GradientBoostingClassifier(random_state=42, n_estimators=gb_cv.best_params_['n_estimators'], learning_rate=gb_cv.best_params_['learning_rate'])
-lr_final = LogisticRegression(max_iter=5000, random_state=42, C=lr_cv.best_params_['C'])
 
+# Use only probabilistic models for final prediction ensemble
+gb_final = GradientBoostingClassifier(random_state=42, n_estimators=200, learning_rate=0.1)
+lr_final = LogisticRegression(max_iter=5000, random_state=42, C=1)
 ensemble_final = VotingClassifier(estimators=[
-    ('rf', rf_final),
     ('gb', gb_final),
     ('lr', lr_final)
 ], voting='soft')
-ensemble_final.fit(X_pred_scaled, author_full.get(f'appeared_{max_year}', 0))
+ensemble_final.fit(X_pred_scaled, author_full['appeared_target'])
 
 author_full['predict_next'] = ensemble_final.predict(X_pred_scaled)
-if hasattr(ensemble_final, 'predict_proba') and len(ensemble_final.classes_) == 2:
-    author_full['predict_next_proba'] = ensemble_final.predict_proba(X_pred_scaled)[:, 1]
-else:
-    single_class = ensemble_final.classes_[0]
-    author_full['predict_next_proba'] = np.full(X_pred.shape[0], fill_value=single_class, dtype=float)
+
 author_full['predict_2026'] = ensemble_final.predict(X_pred_scaled)
 
-# --- Assign confidence percentage based on validation splits ---
+# --- Assign confidence percentage based on validation splits and participation history ---
 def get_confidence(row):
-    pattern = (row['num_participations'], row['max_consecutive_years'])
-    stats = confidence_lookup.get(pattern, None)
+    author = row['author']
+    stats = author_val_stats.get(author, None)
+    # 1. Per-author validation accuracy
     if stats and stats['total'] > 0:
-        return 100.0 * stats['correct'] / stats['total']
+        acc_conf = stats['correct'] / stats['total']
+    else:
+        acc_conf = np.nan
+    # 2. Model calibration: mean calibrated probability for true class
+    if stats and stats['probas'] and stats['truths']:
+        cal_conf = np.mean([p if t == 1 else 1-p for p, t in zip(stats['probas'], stats['truths'])])
+    else:
+        cal_conf = np.nan
+    # 3. Temper by participation history length
+    n_part = row.get('num_participations', 0)
+    temper = min(1.0, 0.5 + 0.5 * np.tanh((n_part-2)/3))  # 0.5 for very sparse, ~1 for moderate+ history
+    if not np.isnan(cal_conf):
+        return 100.0 * cal_conf * temper
+    elif not np.isnan(acc_conf):
+        return 100.0 * acc_conf * temper
     else:
         return np.nan
+
 author_full['confidence_percent'] = author_full.apply(get_confidence, axis=1)
 
+# --- Paper count: bootstrapped prediction intervals ---
+def bootstrap_paper_count(model, X, n_boot=100):
+    preds = []
+    n = X.shape[0]
+    for _ in range(n_boot):
+        idx = np.random.choice(n, n, replace=True)
+        Xb = X.iloc[idx]
+        preds.append(model.predict(Xb))
+    preds = np.array(preds)
+    mean_pred = np.mean(preds, axis=0)
+    lower = np.percentile(preds, 2.5, axis=0)
+    upper = np.percentile(preds, 97.5, axis=0)
+    return mean_pred, lower, upper
 
-# Paper count regression: predict number of papers for next year
-author_year_paper_counts = df.groupby(['author', 'year']).size().reset_index(name='papers_per_year')
-author_paper_counts = df.groupby('author').size().reset_index(name='num_papers_submitted')
+mean_rf, lower_rf, upper_rf = bootstrap_paper_count(rf_reg, reg_X_pred_clean)
+mean_hgb, lower_hgb, upper_hgb = bootstrap_paper_count(hgb_reg, reg_X_pred_clean)
+mean_ens = 0.5 * mean_rf + 0.5 * mean_hgb
+lower_ens = 0.5 * lower_rf + 0.5 * lower_hgb
+upper_ens = 0.5 * upper_rf + 0.5 * upper_hgb
 
-# Prepare regression data
-regression_rows = []
-for _, row in author_year_paper_counts.iterrows():
-    author = row['author']
-    year = row['year']
-    # Use features up to year-1
-    feats = author_full[author_full['author'] == author]
-    if feats.empty: continue
-    feats = feats.iloc[0]
-    regression_rows.append({
-        'author': author,
-        'year': year,
-        'papers_per_year': row['papers_per_year'],
-        **{k: feats[k] for k in base_features if k in feats}
-    })
-reg_df = pd.DataFrame(regression_rows)
-
-
-reg_train = reg_df[reg_df['year'] < max_year]
-reg_test = reg_df[reg_df['year'] == max_year]
-reg_features = base_features
-reg_X_train = reg_train[reg_features]
-reg_y_train = reg_train['papers_per_year']
-reg_X_test = reg_test[reg_features]
-reg_y_test = reg_test['papers_per_year'] if not reg_test.empty else None
-
-regressor = RandomForestRegressor(n_estimators=100, random_state=42)
-regressor.fit(reg_X_train, reg_y_train)
-if not reg_X_test.empty and reg_y_test is not None:
-    reg_pred = regressor.predict(reg_X_test)
-    print("Paper count regression RMSE:", np.sqrt(mean_squared_error(reg_y_test, reg_pred)))
-
-# Predict for next year for all authors
-author_full['expected_papers_next'] = regressor.predict(author_full[reg_features].fillna(0))
+author_full['expected_papers_next'] = mean_ens
 author_full['expected_papers_next'] = author_full['expected_papers_next'].apply(lambda x: max(0, round(x)))
+author_full['expected_papers_next_lower'] = lower_ens
+author_full['expected_papers_next_upper'] = upper_ens
 
+
+# After computing bootstrapped intervals for paper count
+print('Sample expected paper count predictions (mean ± 95% CI):')
+for i, row in author_full.head(10).iterrows():
+    print(f"{row['author']}: {row['expected_papers_next']} (95% CI: {row['expected_papers_next_lower']:.2f}–{row['expected_papers_next_upper']:.2f})")
+
+# Print sample participation confidence scores
+print('\nSample participation confidence scores:')
+for i, row in author_full.head(10).iterrows():
+    print(f"{row['author']}: {row['confidence_percent']:.1f}%")
 
 # Prepare final output
 # Prepare final output
@@ -265,7 +344,6 @@ final_df_out = final_df[['author',
                         'last_year',
                         'num_papers_submitted',
                         'expected_papers_next',
-                        'predict_next_proba',
                         'confidence_percent']]
 final_df_out = final_df_out.rename(columns={
     'author': 'Author',
@@ -275,7 +353,6 @@ final_df_out = final_df_out.rename(columns={
     'last_year': 'Last participated year',
     'num_papers_submitted': 'Number of papers submitted',
     'expected_papers_next': 'Number of papers expected to submit in upcoming year',
-    'predict_next_proba': 'Probability of participation in upcoming year',
     'confidence_percent': 'Confidence in prediction (%)'
 })
 final_df_out.to_csv('author_participation_predictions.csv', index=False)
