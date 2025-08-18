@@ -94,7 +94,10 @@ author_full = pd.concat([author_years['author'], author_feats_df], axis=1)
 # Time-based validation: rolling window
 
 # Time-based cross-validation: train on all years before, test on the next year
+
+# --- Validation split with confidence tracking ---
 results = []
+confidence_lookup = {}
 for test_year in range(min_year+3, max_year+1):
     train_years = [y for y in all_years if y < test_year]
     feature_cols = [f'appeared_{y}' for y in train_years]
@@ -104,27 +107,22 @@ for test_year in range(min_year+3, max_year+1):
     X_test = X_train.copy()
     y_test = y_train if isinstance(y_train, pd.Series) else pd.Series([y_train]*len(X_test), index=X_test.index)
 
-    # Skip if y_train is not a Series/array or has only one unique value
     if not isinstance(y_train, (pd.Series, np.ndarray)) or len(np.unique(y_train)) < 2:
         print(f"[Skipping year {test_year}] Not enough class diversity in training labels.")
         continue
 
-    # Scale features
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # Ensemble: Random Forest, Gradient Boosting, Logistic Regression
     rf = RandomForestClassifier(random_state=42)
     gb = GradientBoostingClassifier(random_state=42)
     lr = LogisticRegression(max_iter=5000, random_state=42)
 
-    # Hyperparameter grids
     rf_grid = {'n_estimators': [100, 200], 'max_depth': [None, 5]}
     gb_grid = {'n_estimators': [100, 200], 'learning_rate': [0.05, 0.1]}
     lr_grid = {'C': [0.1, 1, 10]}
 
-    # Grid search for each model
     rf_cv = GridSearchCV(rf, rf_grid, cv=3, n_jobs=-1)
     gb_cv = GridSearchCV(gb, gb_grid, cv=3, n_jobs=-1)
     lr_cv = GridSearchCV(lr, lr_grid, cv=3, n_jobs=-1)
@@ -132,7 +130,6 @@ for test_year in range(min_year+3, max_year+1):
     gb_cv.fit(X_train_scaled, y_train)
     lr_cv.fit(X_train_scaled, y_train)
 
-    # Voting ensemble
     ensemble = VotingClassifier(estimators=[
         ('rf', rf_cv.best_estimator_),
         ('gb', gb_cv.best_estimator_),
@@ -140,13 +137,11 @@ for test_year in range(min_year+3, max_year+1):
     ], voting='soft')
     ensemble.fit(X_train_scaled, y_train)
     y_pred = ensemble.predict(X_test_scaled)
-    # Robust probability output
     if hasattr(ensemble, 'predict_proba') and len(ensemble.classes_) == 2:
         y_proba = ensemble.predict_proba(X_test_scaled)[:, 1]
     else:
         single_class = ensemble.classes_[0]
         y_proba = np.full_like(y_test, fill_value=single_class, dtype=float)
-    # Only compute AUC if both classes are present in y_test
     if len(np.unique(y_test)) == 2:
         auc = roc_auc_score(y_test, y_proba)
     else:
@@ -156,6 +151,20 @@ for test_year in range(min_year+3, max_year+1):
     results.append({'test_year': test_year, 'auc': auc, 'report': report})
     print(f"Year {test_year} AUC: {auc if not np.isnan(auc) else 'undefined (one class)'}")
     print(classification_report(y_test, y_pred))
+
+    # --- Track confidence by participation pattern ---
+    import collections.abc
+    if isinstance(y_pred, (np.ndarray, list, collections.abc.Sequence)) and len(y_pred) == len(y_test):
+        for i in range(len(y_pred)):
+            row = author_full.iloc[i]
+            pattern = (row['num_participations'], row['max_consecutive_years'])
+            pred = y_pred[i]
+            true = y_test.iloc[i]
+            if pattern not in confidence_lookup:
+                confidence_lookup[pattern] = {'correct': 0, 'total': 0}
+            if pred == true:
+                confidence_lookup[pattern]['correct'] += 1
+            confidence_lookup[pattern]['total'] += 1
 
 # Use ensemble for final prediction (train on all years up to max_year)
 predict_year = max_year + 1
@@ -178,15 +187,24 @@ ensemble_final = VotingClassifier(estimators=[
     ('lr', lr_final)
 ], voting='soft')
 ensemble_final.fit(X_pred_scaled, author_full.get(f'appeared_{max_year}', 0))
+
 author_full['predict_next'] = ensemble_final.predict(X_pred_scaled)
-# Robust probability output for final prediction
 if hasattr(ensemble_final, 'predict_proba') and len(ensemble_final.classes_) == 2:
     author_full['predict_next_proba'] = ensemble_final.predict_proba(X_pred_scaled)[:, 1]
 else:
     single_class = ensemble_final.classes_[0]
     author_full['predict_next_proba'] = np.full(X_pred.shape[0], fill_value=single_class, dtype=float)
-
 author_full['predict_2026'] = ensemble_final.predict(X_pred_scaled)
+
+# --- Assign confidence percentage based on validation splits ---
+def get_confidence(row):
+    pattern = (row['num_participations'], row['max_consecutive_years'])
+    stats = confidence_lookup.get(pattern, None)
+    if stats and stats['total'] > 0:
+        return 100.0 * stats['correct'] / stats['total']
+    else:
+        return np.nan
+author_full['confidence_percent'] = author_full.apply(get_confidence, axis=1)
 
 
 # Paper count regression: predict number of papers for next year
@@ -237,6 +255,7 @@ final_df = final_df.merge(author_paper_counts[['author', 'num_papers_submitted']
 final_df['predicted_next_participation_year'] = predict_year * final_df['predict_next']
 final_df.loc[final_df['predicted_next_participation_year'] == 0, 'predicted_next_participation_year'] = ''
 
+
 final_df_out = final_df[['author',
                         'predicted_next_participation_year',
                         'num_participations',
@@ -244,7 +263,8 @@ final_df_out = final_df[['author',
                         'last_year',
                         'num_papers_submitted',
                         'expected_papers_next',
-                        'predict_next_proba']]
+                        'predict_next_proba',
+                        'confidence_percent']]
 final_df_out = final_df_out.rename(columns={
     'author': 'Author',
     'predicted_next_participation_year': 'Predicted next participation year',
@@ -253,10 +273,11 @@ final_df_out = final_df_out.rename(columns={
     'last_year': 'Last participated year',
     'num_papers_submitted': 'Number of papers submitted',
     'expected_papers_next': 'Number of papers expected to submit in upcoming year',
-    'predict_next_proba': 'Probability of participation in upcoming year'
+    'predict_next_proba': 'Probability of participation in upcoming year',
+    'confidence_percent': 'Confidence in prediction (%)'
 })
 final_df_out.to_csv('author_participation_predictions.csv', index=False)
-print('Final author participation predictions saved to author_participation_predictions.csv')
+print('Final author participation predictions saved to author_participation_predictions.csv (with confidence percentages)')
 
 
 # Bar graph: number of unique authors per year (actual only, no 2026 prediction)
