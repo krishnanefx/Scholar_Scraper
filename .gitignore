@@ -123,13 +123,6 @@ dmypy.json
 ehthumbs.db
 Thumbs.db
 
-# Project specific
-cache/
-outputs/*.xlsx
-data/processed/*.pkl
-data/processed/*.csv
-*.log
-queue.txt
 
 # Large data files
 data/raw/*.parquet
