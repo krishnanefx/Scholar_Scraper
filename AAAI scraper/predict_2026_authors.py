@@ -253,6 +253,8 @@ author_full['expected_papers_next'] = author_full['expected_papers_next'].apply(
 final_df = author_full.copy()
 final_df = final_df.merge(author_paper_counts[['author', 'num_papers_submitted']], on='author', how='left')
 final_df['predicted_next_participation_year'] = predict_year * final_df['predict_next']
+# Cast to object type to allow string assignment and avoid FutureWarning
+final_df['predicted_next_participation_year'] = final_df['predicted_next_participation_year'].astype(object)
 final_df.loc[final_df['predicted_next_participation_year'] == 0, 'predicted_next_participation_year'] = ''
 
 
