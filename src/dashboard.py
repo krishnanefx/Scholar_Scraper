@@ -17,7 +17,25 @@ st.set_page_config(page_title="AI Researcher Database", page_icon="📚", layout
 st.title("📚 Scholar Queue Enqueuer")
 # Define the insert file (NOT the queue file)
 INSERT_FILE = "../cache/queue_insert.jsonl"
-PROFILES_FILE = "../data/processed/scholar_profiles_updated.csv"
+PROFILES_FILE = "data/processed/scholar_profiles.csv"
+
+_PROFILES_DF_CACHE = None
+
+def get_profiles_df():
+    """Load profiles CSV once and cache result to avoid repeated disk I/O."""
+    global _PROFILES_DF_CACHE
+    if _PROFILES_DF_CACHE is None:
+        if os.path.exists(PROFILES_FILE):
+            try:
+                df = pd.read_csv(PROFILES_FILE, engine='python', on_bad_lines='skip')
+                df.replace(["NaN", "nan", ""], np.nan, inplace=True)
+                df.columns = [c.strip() for c in df.columns]
+                _PROFILES_DF_CACHE = df
+            except Exception:
+                _PROFILES_DF_CACHE = pd.DataFrame()
+        else:
+            _PROFILES_DF_CACHE = pd.DataFrame()
+    return _PROFILES_DF_CACHE
 
 
 st.markdown("Enter one or more Google Scholar **user IDs** below to enqueue (non-destructively):")
@@ -349,10 +367,7 @@ def extract_topic_tags(topic_str):
 st.divider()
 st.header("📊 Profile Stats")
 if os.path.exists(PROFILES_FILE):
-    # === 📥 Load and Clean Data ===
-    df = pd.read_csv(PROFILES_FILE, engine='python', on_bad_lines='skip')
-    df.replace(["NaN", "nan", ""], np.nan, inplace=True)
-    df.columns = [c.strip() for c in df.columns]
+    df = get_profiles_df()
 
     # === 🧠 Compute 🇸🇬 Singapore Co-author Count ===
     required_cols = {"user_id", "country", "coauthors"}
@@ -690,7 +705,7 @@ def fuzzy_author_search(df, query, score_cutoff=70):
     if df.empty or not query.strip():
         return pd.DataFrame()
     names = df["name"].dropna().unique()
-    results = process.extract(query, names, limit=None)
+    results = process.extract(query, names, limit=100)
     filtered = [r for r in results if r[1] >= score_cutoff]
     matched_names = [r[0] for r in filtered]
     if not matched_names:
@@ -701,7 +716,7 @@ def fuzzy_institution_search(df, query, score_cutoff=70):
     if df.empty or not query.strip() or "institution" not in df.columns:
         return pd.DataFrame()
     institutions = df["institution"].dropna().unique()
-    results = process.extract(query, institutions, limit=None)
+    results = process.extract(query, institutions, limit=100)
     filtered = [r for r in results if r[1] >= score_cutoff]
     matched_insts = [r[0] for r in filtered]
     if not matched_insts:
@@ -767,112 +782,112 @@ def display_author_info(author_row):
 
 
 if search_query:
-    if os.path.exists(PROFILES_FILE):
-        df = pd.read_csv(PROFILES_FILE, engine='python', on_bad_lines='skip')
+    df = get_profiles_df()
 
-        # Search by name
-        matches_df = fuzzy_author_search(df, search_query, score_cutoff=70)
+    # Search by name
+    matches_df = fuzzy_author_search(df, search_query, score_cutoff=70)
 
-        # If no matches by name, try institution search
-        if matches_df.empty:
-            matches_df = fuzzy_institution_search(df, search_query, score_cutoff=70)
+    # If no matches by name, try institution search
+    if matches_df.empty:
+        matches_df = fuzzy_institution_search(df, search_query, score_cutoff=70)
 
-        if matches_df.empty:
-            st.info("No authors found matching your query.")
-        else:
-            # === Filters ===
-            with st.expander("🔧 Filter & Sort Options", expanded=True):
-                # Filter by country
-                if "country" in matches_df.columns:
-                    countries = sorted(matches_df["country"].dropna().unique())
-                    selected_countries = st.multiselect("🌍 Filter by Country", countries, default=countries)
-                    matches_df = matches_df[matches_df["country"].isin(selected_countries)]
+    if matches_df.empty:
+        st.info("No authors found matching your query.")
+    else:
+        # === Filters ===
+        with st.expander("🔧 Filter & Sort Options", expanded=True):
+            # Filter by country
+            if "country" in matches_df.columns:
+                countries = sorted(matches_df["country"].dropna().unique())
+                selected_countries = st.multiselect("🌍 Filter by Country", countries, default=countries)
+                matches_df = matches_df[matches_df["country"].isin(selected_countries)]
 
-                # Filter by prestigious awards
-                if "wiki_awards" in matches_df.columns:
-                    award_filter = st.selectbox(
-                        "🏅 Filter by Prestigious Award",
-                        options=["Any"] + list(PRESTIGIOUS_AWARDS_DISPLAY.values()) + ["None"],
-                        index=0
-                    )
-                    if award_filter == "None":
-                        matches_df = matches_df[matches_df["wiki_awards"].fillna("").str.strip() == ""]
-                    elif award_filter != "Any":
-                        award_key = next(k for k, v in PRESTIGIOUS_AWARDS_DISPLAY.items() if v == award_filter)
-                        matches_df = matches_df[matches_df["wiki_awards"].fillna("").str.lower().str.contains(award_key)]
+            # Filter by prestigious awards
+            if "wiki_awards" in matches_df.columns:
+                award_filter = st.selectbox(
+                    "🏅 Filter by Prestigious Award",
+                    options=["Any"] + list(PRESTIGIOUS_AWARDS_DISPLAY.values()) + ["None"],
+                    index=0
+                )
+                if award_filter == "None":
+                    matches_df = matches_df[matches_df["wiki_awards"].fillna("").str.strip() == ""]
+                elif award_filter != "Any":
+                    award_key = next(k for k, v in PRESTIGIOUS_AWARDS_DISPLAY.items() if v == award_filter)
+                    matches_df = matches_df[matches_df["wiki_awards"].fillna("").str.lower().str.contains(award_key)]
 
-                # Filter by prestigious fellowships
-                fellowship_column = "wiki_fellowships" if "wiki_fellowships" in matches_df.columns else "wiki_awards"
-                if fellowship_column in matches_df.columns:
-                    fellowship_filter = st.selectbox(
-                        "🎓 Filter by Prestigious Fellowship",
-                        options=["Any"] + list(PRESTIGIOUS_FELLOWSHIPS_DISPLAY.values()) + ["None"],
-                        index=0
-                    )
-                    if fellowship_filter == "None":
-                        matches_df = matches_df[matches_df[fellowship_column].fillna("").apply(lambda x: len(extract_prestigious_fellowships(x)) == 0)]
-                    elif fellowship_filter != "Any":
-                        fellowship_key = next(k for k, v in PRESTIGIOUS_FELLOWSHIPS_DISPLAY.items() if v == fellowship_filter)
-                        matches_df = matches_df[matches_df[fellowship_column].fillna("").str.lower().str.contains(fellowship_key)]
+            # Filter by prestigious fellowships
+            fellowship_column = "wiki_fellowships" if "wiki_fellowships" in matches_df.columns else "wiki_awards"
+            if fellowship_column in matches_df.columns:
+                fellowship_filter = st.selectbox(
+                    "🎓 Filter by Prestigious Fellowship",
+                    options=["Any"] + list(PRESTIGIOUS_FELLOWSHIPS_DISPLAY.values()) + ["None"],
+                    index=0
+                )
+                if fellowship_filter == "None":
+                    matches_df = matches_df[matches_df[fellowship_column].fillna("").apply(lambda x: len(extract_prestigious_fellowships(x)) == 0)]
+                elif fellowship_filter != "Any":
+                    fellowship_key = next(k for k, v in PRESTIGIOUS_FELLOWSHIPS_DISPLAY.items() if v == fellowship_filter)
+                    matches_df = matches_df[matches_df[fellowship_column].fillna("").str.lower().str.contains(fellowship_key)]
 
-                # Filter by h-index
-                if "h_index_all" in matches_df.columns:
+            # Filter by h-index
+            if "h_index_all" in matches_df.columns:
+                try:
                     min_h = int(np.nanmin(matches_df["h_index_all"]))
                     max_h = int(np.nanmax(matches_df["h_index_all"]))
+                except Exception:
+                    min_h = 0
+                    max_h = 100
 
-                    if min_h == max_h:
-                        st.info(f"All matching authors have the same h-index: {min_h}")
-                        h_range = (min_h, max_h)
-                    else:
-                        h_range = st.slider(
-                            "📈 Filter by h-index",
-                            min_value=min_h,
-                            max_value=max_h,
-                            value=(min_h, max_h)
-                        )
+                if min_h == max_h:
+                    st.info(f"All matching authors have the same h-index: {min_h}")
+                    h_range = (min_h, max_h)
+                else:
+                    h_range = st.slider(
+                        "📈 Filter by h-index",
+                        min_value=min_h,
+                        max_value=max_h,
+                        value=(min_h, max_h)
+                    )
 
-                    matches_df = matches_df[
-                        (matches_df["h_index_all"].astype(float) >= h_range[0]) &
-                        (matches_df["h_index_all"].astype(float) <= h_range[1])
-                    ]
+                matches_df = matches_df[
+                    (matches_df["h_index_all"].astype(float) >= h_range[0]) &
+                    (matches_df["h_index_all"].astype(float) <= h_range[1])
+                ]
 
-                # Sort
-                sort_by = st.selectbox("📊 Sort by", ["Name", "h-index", "Country"], index=0)
-                sort_order = st.radio("🔃 Order", ["Ascending", "Descending"], horizontal=True, index=0)
+            # Sort
+            sort_by = st.selectbox("📊 Sort by", ["Name", "h-index", "Country"], index=0)
+            sort_order = st.radio("🔃 Order", ["Ascending", "Descending"], horizontal=True, index=0)
 
-                sort_map = {
-                    "Name": "name",
-                    "h-index": "h_index_all",
-                    "Country": "country"
-                }
-                sort_col = sort_map[sort_by]
-                matches_df = matches_df.sort_values(
-                    by=sort_col,
-                    ascending=(sort_order == "Ascending"),
-                    na_position="last"
-                )
+            sort_map = {
+                "Name": "name",
+                "h-index": "h_index_all",
+                "Country": "country"
+            }
+            sort_col = sort_map[sort_by]
+            matches_df = matches_df.sort_values(
+                by=sort_col,
+                ascending=(sort_order == "Ascending"),
+                na_position="last"
+            )
 
-            # === Display Results ===
-            if matches_df.empty:
-                st.info("No authors found after applying filters.")
-            else:
-                st.write(f"Showing {len(matches_df)} author(s) matching `{search_query}`:")
-                for idx, row in matches_df.iterrows():
-                    with st.expander(row["name"]):
-                        display_author_info(row)
-                
-                # Use display columns for CSV download
-                display_cols = get_display_columns(matches_df)
-                matches_csv = matches_df[display_cols].to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "📥 Download Filtered Search Results CSV",
-                    data=matches_csv,
-                    file_name="author_search_filtered_results.csv",
-                    mime="text/csv"
-                )
-    else:
-        st.info("Profiles file not found yet.")
-
+        # === Display Results ===
+        if matches_df.empty:
+            st.info("No authors found after applying filters.")
+        else:
+            st.write(f"Showing {len(matches_df)} author(s) matching `{search_query}`:")
+            for idx, row in matches_df.iterrows():
+                with st.expander(row["name"]):
+                    display_author_info(row)
+            
+            # Use display columns for CSV download
+            display_cols = get_display_columns(matches_df)
+            matches_csv = matches_df[display_cols].to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Download Filtered Search Results CSV",
+                data=matches_csv,
+                file_name="author_search_filtered_results.csv",
+                mime="text/csv"
+            )
 else:
     st.info("Enter a search query above to find authors.")
 
@@ -962,125 +977,141 @@ else:
     st.info("No insert file found yet. Add users to begin populating it.")
 
 # === Network Graph Visualization Section ===
-import networkx as nx
-from pyvis.network import Network
+_PYVIS_AVAILABLE = None
+
+def _ensure_pyvis():
+    """Lazy import pyvis and networkx; return (nx, Network) or raise ImportError."""
+    global _PYVIS_AVAILABLE
+    if _PYVIS_AVAILABLE is not None:
+        return _PYVIS_AVAILABLE
+    try:
+        import networkx as nx
+        from pyvis.network import Network
+        _PYVIS_AVAILABLE = (nx, Network)
+        return _PYVIS_AVAILABLE
+    except Exception:
+        _PYVIS_AVAILABLE = None
+        return None
 import streamlit.components.v1 as components
 
 st.divider()
 st.header("🌐 Visualize Author Network (3 Degrees)")
 
 if os.path.exists(PROFILES_FILE):
-    df_net = pd.read_csv(PROFILES_FILE, engine='python', on_bad_lines='skip')
+    df_net = get_profiles_df()
     st.markdown("Enter one or more user_ids (one per line) to visualize their combined network:")
     user_ids_input = st.text_area("User IDs for Network Graph", placeholder="Paste user_ids here, one per line")
     degree_choice = st.selectbox("Degree of separation:", [1, 2, 3], index=2, help="Choose how many degrees of separation to include in the network graph.")
 
     if st.button("Generate and Export Network for Gephi") and user_ids_input.strip():
         input_ids = [uid.strip() for uid in user_ids_input.replace(",", "\n").splitlines() if uid.strip()]
-        G = nx.Graph()
-        # Build the network from user_id and coauthors columns
-        for idx, row in df_net.iterrows():
-            uid = str(row.get('user_id', '')).strip()
-            coauthors_raw = row.get('coauthors', None)
-            if not uid or pd.isna(coauthors_raw):
-                continue
-            try:
-                coauthors = ast.literal_eval(coauthors_raw) if isinstance(coauthors_raw, str) and coauthors_raw.strip().startswith("[") else []
-            except Exception:
-                coauthors = []
-            for c in coauthors:
-                # coauthors can be dicts or strings
-                if isinstance(c, dict) and 'user_id' in c:
-                    co_id = str(c['user_id']).strip()
-                elif isinstance(c, str):
-                    co_id = c.strip()
-                else:
-                    continue
-                if co_id:
-                    G.add_edge(uid, co_id)
-
-        # Check which input IDs are in the graph
-        missing = [uid for uid in input_ids if uid not in G]
-        if missing:
-            st.warning(f"These user IDs were not found in the network: {', '.join(missing)}")
-        found_ids = [uid for uid in input_ids if uid in G]
-        if not found_ids:
-            st.error("None of the entered user IDs were found in the network.")
+        ensure = _ensure_pyvis()
+        if ensure is None:
+            st.warning("Visualization libraries not available. Install 'pyvis' and 'networkx' to enable network graph export and visualization.")
         else:
-            # Union of all nodes within selected degree for all found_ids
-            nodes_within = set()
-            for uid in found_ids:
-                nodes_within.update(nx.single_source_shortest_path_length(G, uid, cutoff=degree_choice).keys())
-            subG = G.subgraph(nodes_within)
+            nx, _Network = ensure
+            G = nx.Graph()
+            # Build the network from user_id and coauthors columns
+            for idx, row in df_net.iterrows():
+                uid = str(row.get('user_id', '')).strip()
+                coauthors_raw = row.get('coauthors', None)
+                if not uid or pd.isna(coauthors_raw):
+                    continue
+                try:
+                    coauthors = ast.literal_eval(coauthors_raw) if isinstance(coauthors_raw, str) and coauthors_raw.strip().startswith("[") else []
+                except Exception:
+                    coauthors = []
+                for c in coauthors:
+                    # coauthors can be dicts or strings
+                    if isinstance(c, dict) and 'user_id' in c:
+                        co_id = str(c['user_id']).strip()
+                    elif isinstance(c, str):
+                        co_id = c.strip()
+                    else:
+                        continue
+                    if co_id:
+                        G.add_edge(uid, co_id)
 
+            # Check which input IDs are in the graph
+            missing = [uid for uid in input_ids if uid not in G]
+            if missing:
+                st.warning(f"These user IDs were not found in the network: {', '.join(missing)}")
+            found_ids = [uid for uid in input_ids if uid in G]
+            if not found_ids:
+                st.error("None of the entered user IDs were found in the network.")
+            else:
+                # Union of all nodes within selected degree for all found_ids
+                nodes_within = set()
+                for uid in found_ids:
+                    nodes_within.update(nx.single_source_shortest_path_length(G, uid, cutoff=degree_choice).keys())
+                subG = G.subgraph(nodes_within)
 
-            # Efficient shell assignment and node attribute extraction
-            shells = []
-            main_shell = [n for n in subG.nodes if n in found_ids]
-            shells.append(main_shell)
-            layer1 = list(set.union(*(set(subG.neighbors(n)) for n in main_shell)) - set(main_shell)) if main_shell else []
-            if layer1:
-                shells.append(layer1)
-            layer2 = list(set.union(*(set(subG.neighbors(n)) for n in layer1)) - set(main_shell) - set(layer1)) if layer1 else []
-            layer2 = [n for n in layer2 if subG.degree[n] > 3]
-            if layer2:
-                shells.append(layer2)
-            layer3 = list(set.union(*(set(subG.neighbors(n)) for n in layer2)) - set(main_shell) - set(layer1) - set(layer2)) if layer2 else []
-            layer3 = [n for n in layer3 if subG.degree[n] > 3]
-            if layer3:
-                shells.append(layer3)
+                # Efficient shell assignment and node attribute extraction
+                shells = []
+                main_shell = [n for n in subG.nodes if n in found_ids]
+                shells.append(main_shell)
+                layer1 = list(set.union(*(set(subG.neighbors(n)) for n in main_shell)) - set(main_shell)) if main_shell else []
+                if layer1:
+                    shells.append(layer1)
+                layer2 = list(set.union(*(set(subG.neighbors(n)) for n in layer1)) - set(main_shell) - set(layer1)) if layer1 else []
+                layer2 = [n for n in layer2 if subG.degree[n] > 3]
+                if layer2:
+                    shells.append(layer2)
+                layer3 = list(set.union(*(set(subG.neighbors(n)) for n in layer2)) - set(main_shell) - set(layer1) - set(layer2)) if layer2 else []
+                layer3 = [n for n in layer3 if subG.degree[n] > 3]
+                if layer3:
+                    shells.append(layer3)
 
-            # Assign depth and gather node attributes in one pass
-            node_depth = {}
-            node_citations = {}
-            node_labels = {}
-            user_id_to_row = {str(row['user_id']).strip(): row for _, row in df_net.iterrows()}
-            for depth, shell in enumerate(shells):
-                for n in shell:
-                    node_depth[n] = depth
-            for n in subG.nodes:
-                row = user_id_to_row.get(n)
-                if row is not None:
-                    citations = row.get('citations_all', 10)
-                    name = row.get('name', n)
-                else:
-                    citations = 10
-                    name = n
-                node_citations[n] = citations
-                node_labels[n] = name
-
-            # --- Export to Gephi (GEXF) ---
-
-            import io
-            gexf_bytes = None
-            try:
-                color_map_rgb = {
-                    0: {'r': 255, 'g': 0, 'b': 0, 'a': 1.0},      # red
-                    1: {'r': 0, 'g': 102, 'b': 255, 'a': 1.0},     # blue
-                    2: {'r': 0, 'g': 153, 'b': 51, 'a': 1.0},      # green
-                    3: {'r': 255, 'g': 153, 'b': 0, 'a': 1.0}      # orange
-                }
+                # Assign depth and gather node attributes in one pass
+                node_depth = {}
+                node_citations = {}
+                node_labels = {}
+                user_id_to_row = {str(row['user_id']).strip(): row for _, row in df_net.iterrows()}
+                for depth, shell in enumerate(shells):
+                    for n in shell:
+                        node_depth[n] = depth
                 for n in subG.nodes:
-                    size = 10 + (np.log1p(node_citations.get(n, 10)) if node_citations.get(n, 10) > 0 else 1) * 2.5
-                    depth = node_depth.get(n, 3)
-                    color = color_map_rgb.get(depth, {'r': 128, 'g': 128, 'b': 128, 'a': 1.0})
-                    subG.nodes[n]['label'] = node_labels.get(n, str(n))
-                    subG.nodes[n]['size'] = float(size)
-                    subG.nodes[n]['viz'] = {
-                        'size': float(size),
-                        'color': color
+                    row = user_id_to_row.get(n)
+                    if row is not None:
+                        citations = row.get('citations_all', 10)
+                        name = row.get('name', n)
+                    else:
+                        citations = 10
+                        name = n
+                    node_citations[n] = citations
+                    node_labels[n] = name
+
+                # --- Export to Gephi (GEXF) ---
+                import io
+                gexf_bytes = None
+                try:
+                    color_map_rgb = {
+                        0: {'r': 255, 'g': 0, 'b': 0, 'a': 1.0},      # red
+                        1: {'r': 0, 'g': 102, 'b': 255, 'a': 1.0},     # blue
+                        2: {'r': 0, 'g': 153, 'b': 51, 'a': 1.0},      # green
+                        3: {'r': 255, 'g': 153, 'b': 0, 'a': 1.0}      # orange
                     }
-                gexf_io = io.BytesIO()
-                nx.write_gexf(subG, gexf_io)
-                gexf_bytes = gexf_io.getvalue()
-            except Exception as e:
-                st.warning(f"Could not export GEXF: {e}")
-            if gexf_bytes:
-                st.download_button(
-                    label="Export Network for Gephi (.gexf)",
-                    data=gexf_bytes,
-                    file_name="author_network.gexf",
-                    mime="application/octet-stream"
-                )
+                    for n in subG.nodes:
+                        size = 10 + (np.log1p(node_citations.get(n, 10)) if node_citations.get(n, 10) > 0 else 1) * 2.5
+                        depth = node_depth.get(n, 3)
+                        color = color_map_rgb.get(depth, {'r': 128, 'g': 128, 'b': 128, 'a': 1.0})
+                        subG.nodes[n]['label'] = node_labels.get(n, str(n))
+                        subG.nodes[n]['size'] = float(size)
+                        subG.nodes[n]['viz'] = {
+                            'size': float(size),
+                            'color': color
+                        }
+                    gexf_io = io.BytesIO()
+                    nx.write_gexf(subG, gexf_io)
+                    gexf_bytes = gexf_io.getvalue()
+                except Exception as e:
+                    st.warning(f"Could not export GEXF: {e}")
+                if gexf_bytes:
+                    st.download_button(
+                        label="Export Network for Gephi (.gexf)",
+                        data=gexf_bytes,
+                        file_name="author_network.gexf",
+                        mime="application/octet-stream"
+                    )
 else:
     st.info("Profiles file not found. Cannot build network graph.")

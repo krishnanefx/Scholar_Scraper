@@ -40,10 +40,12 @@ def match_authors_with_profiles(predicted_participants, scholar_profiles, confer
     Match predicted participants with scholar profiles using fuzzy string matching
     """
     print(f"Matching {conference_name} predicted participants with scholar profiles...")
-    
-    # Clean names for better matching
-    predicted_participants['clean_name'] = predicted_participants['predicted_author'].apply(clean_name)
-    scholar_profiles['clean_name'] = scholar_profiles['name'].apply(clean_name)
+
+    # Avoid SettingWithCopyWarning: operate on copies and use .loc for assignment
+    predicted_participants = predicted_participants.copy()
+    scholar_profiles = scholar_profiles.copy()
+    predicted_participants.loc[:, 'clean_name'] = predicted_participants.get('predicted_author', predicted_participants.get('author', '')).apply(clean_name)
+    scholar_profiles.loc[:, 'clean_name'] = scholar_profiles.get('name', '').apply(clean_name)
     
     # Create lookup dictionary for scholar profiles
     scholar_lookup = {}
@@ -73,6 +75,9 @@ def match_authors_with_profiles(predicted_participants, scholar_profiles, confer
                 return series[col]
         return default
     
+    # Precompute scholar names list once for fuzzy lookups
+    scholar_names = list(scholar_lookup.keys())
+
     for idx, predicted_row in tqdm(predicted_participants.iterrows(),
                                   total=len(predicted_participants),
                                   desc=f"Matching {conference_name}"):
@@ -87,9 +92,8 @@ def match_authors_with_profiles(predicted_participants, scholar_profiles, confer
             best_match = scholar_lookup[predicted_name][0]
             best_score = 100
         else:
-            # Use fuzzy matching
-            scholar_names = list(scholar_lookup.keys())
-            if scholar_names:
+            # Use fuzzy matching (skip empty predicted names)
+            if predicted_name and scholar_names:
                 match_result = process.extractOne(predicted_name, scholar_names, scorer=fuzz.ratio)
                 if match_result and match_result[1] >= threshold:
                     matched_scholar_name = match_result[0]
@@ -199,27 +203,82 @@ def main():
     conferences = ['aaai', 'neurips', 'iclr']
     conferences_data = {}
 
-    for conf in conferences:
-        pred_path = os.path.join(project_root, 'data', 'predictions', f'{conf}_{year}_predictions.csv')
-        try:
-            preds = pd.read_csv(pred_path)
-            # Determine participant filter column flexibly
-            will_col = None
-            for c in preds.columns:
-                if 'will_participate' in c:
-                    will_col = c
-                    break
-            if will_col:
-                participants = preds[preds[will_col] == 1]
-            else:
-                # fallback: use a 'predicted_author' presence
-                participants = preds[~preds['predicted_author'].isna()] if 'predicted_author' in preds.columns else preds
+    # For each conference, pick the latest available predictions file in data/predictions
+    chosen_years = {}
+    predictions_dir = os.path.join(project_root, 'data', 'predictions')
 
-            conferences_data[conf.upper()] = participants
-            print(f"✅ {conf.upper()} {year} predictions loaded: {len(participants)} predicted participants (source: {pred_path})")
-        except Exception as e:
-            print(f"❌ {conf.upper()} predictions not found at {pred_path}: {e}")
+    for conf in conferences:
+        chosen_file = None
+        chosen_year = None
+        # gather candidate files
+        try:
+            files = [f for f in os.listdir(predictions_dir) if f.lower().startswith(conf.lower() + '_') and f.lower().endswith('_predictions.csv')]
+        except Exception:
+            files = []
+
+        if files:
+            # prefer the file with the largest 4-digit year in its name
+            year_files = []
+            for fn in files:
+                m = re.search(r'_(\d{4})_', fn)
+                if not m:
+                    m = re.search(r'_(\d{4})_predictions', fn)
+                if m:
+                    try:
+                        year_files.append((int(m.group(1)), fn))
+                    except Exception:
+                        pass
+            if year_files:
+                year_files.sort(key=lambda x: x[0], reverse=True)
+                chosen_year, chosen_file = year_files[0]
+            else:
+                # fallback: choose the most recently modified matching file
+                files_with_mtime = []
+                for fn in files:
+                    full = os.path.join(predictions_dir, fn)
+                    try:
+                        mtime = os.path.getmtime(full)
+                        files_with_mtime.append((mtime, fn))
+                    except Exception:
+                        pass
+                if files_with_mtime:
+                    files_with_mtime.sort(key=lambda x: x[0], reverse=True)
+                    chosen_file = files_with_mtime[0][1]
+                    # try to extract year even if not present
+                    m = re.search(r'_(\d{4})_', chosen_file) or re.search(r'_(\d{4})_predictions', chosen_file)
+                    if m:
+                        try:
+                            chosen_year = int(m.group(1))
+                        except Exception:
+                            chosen_year = None
+
+        if chosen_file:
+            pred_path = os.path.join(predictions_dir, chosen_file)
+            try:
+                preds = pd.read_csv(pred_path)
+                # Determine participant filter column flexibly
+                will_col = None
+                for c in preds.columns:
+                    if 'will_participate' in c:
+                        will_col = c
+                        break
+                if will_col is not None:
+                    participants = preds[preds[will_col] == 1]
+                else:
+                    participants = preds[~preds['predicted_author'].isna()] if 'predicted_author' in preds.columns else preds
+
+                conferences_data[conf.upper()] = participants
+                chosen_years[conf.upper()] = chosen_year if chosen_year is not None else year
+                print(f"✅ {conf.upper()} {chosen_years[conf.upper()]} predictions loaded: {len(participants)} predicted participants (source: {pred_path})")
+            except Exception as e:
+                print(f"❌ {conf.upper()} predictions not found at {pred_path}: {e}")
+                conferences_data[conf.upper()] = pd.DataFrame()
+                chosen_years[conf.upper()] = None
+        else:
+            # no matching files at all
+            print(f"❌ {conf.upper()} predictions not found in {predictions_dir}")
             conferences_data[conf.upper()] = pd.DataFrame()
+            chosen_years[conf.upper()] = None
     
     # Perform matching for each conference
     all_matched_results = []
@@ -247,7 +306,7 @@ def main():
     # Create Excel file with results
     outputs_dir = os.path.join(project_root, 'outputs')
     os.makedirs(outputs_dir, exist_ok=True)
-    excel_filename = os.path.join(outputs_dir, f'{year}_Conference_Predictions_with_Scholar_Profiles.xlsx')
+    excel_filename = os.path.join(outputs_dir, f'Conference_Predictions_with_Scholar_Profiles.xlsx')
     
     with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
         
@@ -259,10 +318,16 @@ def main():
                 # Sort by prediction rank
                 results_df = results_df.sort_values('Prediction_Rank')
                 
-                # Write to Excel sheet
-                results_df.to_excel(writer, sheet_name=f'{conf_name}_2026', index=False)
-                
-                print(f"\n📊 {conf_name} 2026 Sheet Created:")
+                # Write to Excel sheet (use chosen file year when available)
+                sheet_year = chosen_years.get(conf_name, year)
+                sheet_name = f'{conf_name}_{sheet_year}'
+                try:
+                    results_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                except Exception:
+                    # fallback to conference name only
+                    results_df.to_excel(writer, sheet_name=conf_name, index=False)
+
+                print(f"\n📊 {conf_name} {sheet_year} Sheet Created:")
                 print(f"   • Total matched participants: {len(results_df)}")
                 print(f"   • Average H-index: {pd.to_numeric(results_df['H_Index_All'], errors='coerce').mean():.1f}")
                 print(f"   • Average Citations: {pd.to_numeric(results_df['Citations_All'], errors='coerce').mean():.0f}")
@@ -304,8 +369,9 @@ def main():
                 avg_h_index = pd.to_numeric(results_df['H_Index_All'], errors='coerce').mean()
                 avg_citations = pd.to_numeric(results_df['Citations_All'], errors='coerce').mean()
                 
+                file_year = chosen_years.get(conf_name, year)
                 summary_data.append({
-                    'Conference': f'{conf_name} {year}',
+                    'Conference': f'{conf_name} {file_year}',
                     'Total_Predictions': total_predicted,
                     'Matched_Profiles': matched_count,
                     'Match_Rate': f"{match_rate:.1f}%",
@@ -322,12 +388,16 @@ def main():
 
         # Write raw predictions (for traceability) into separate sheets
         for conf_key, preds_df in conferences_data.items():
-            if not preds_df.empty:
+            if isinstance(preds_df, pd.DataFrame) and not preds_df.empty:
+                raw_year = chosen_years.get(conf_key, year)
+                raw_sheet = f'Raw_{conf_key}_{raw_year}'
                 try:
-                    preds_df.to_excel(writer, sheet_name=f'Raw_{conf_key}_{year}', index=False)
+                    preds_df.to_excel(writer, sheet_name=raw_sheet, index=False)
                 except Exception:
-                    # sheet name might be too long or invalid; skip silently
-                    pass
+                    try:
+                        preds_df.to_excel(writer, sheet_name=f'Raw_{conf_key}', index=False)
+                    except Exception:
+                        pass
 
         # Write model summaries if any
         if model_summaries:
@@ -348,7 +418,8 @@ def main():
     print("\nFile contains:")
     for conf_name, results_df in conference_results.items():
         if not results_df.empty:
-            print(f"   • {conf_name}_2026 sheet: {len(results_df)} matched participants with full profiles")
+            sheet_year = chosen_years.get(conf_name, year)
+            print(f"   • {conf_name}_{sheet_year} sheet: {len(results_df)} matched participants with full profiles")
     print(f"   • Summary sheet: Conference comparison and statistics")
     if all_unmatched_results:
         print(f"   • Unmatched_Authors sheet: {len(all_unmatched_results)} entries for manual review")

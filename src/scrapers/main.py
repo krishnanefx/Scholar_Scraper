@@ -1,55 +1,20 @@
+
 import asyncio
 import time
 import aiohttp
 import joblib
-import os
-import json
 from functools import lru_cache
 # === CACHING SETUP ===
-# Resolve cache paths relative to this script and ensure cache directory exists
-script_dir = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.normpath(os.path.join(script_dir, '..', '..', 'cache'))
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-WIKI_CACHE_PATH = os.path.join(CACHE_DIR, 'wiki_lookup_cache.joblib')
-FUZZY_CACHE_PATH = os.path.join(CACHE_DIR, 'fuzzy_match_cache.json')
-
-# Safe load helpers
-def _safe_load_joblib(path):
-    if not os.path.exists(path):
-        return {}
-    try:
-        return joblib.load(path)
-    except Exception:
-        return {}
-
-def _safe_load_json(path):
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, 'r') as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-wiki_cache = _safe_load_joblib(WIKI_CACHE_PATH)
-fuzzy_cache = _safe_load_json(FUZZY_CACHE_PATH)
-
-# Safe save helpers
-def _safe_save_joblib(obj, path):
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        joblib.dump(obj, path)
-    except Exception as e:
-        print(f"Warning: failed to save joblib cache to {path}: {e}")
-
-def _safe_save_json(obj, path):
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(obj, f)
-    except Exception as e:
-        print(f"Warning: failed to save json cache to {path}: {e}")
+WIKI_CACHE_PATH = "cache/wiki_lookup_cache.joblib"
+FUZZY_CACHE_PATH = "cache/fuzzy_match_cache.joblib"
+try:
+    wiki_cache = joblib.load(WIKI_CACHE_PATH)
+except Exception:
+    wiki_cache = {}
+try:
+    fuzzy_cache = joblib.load(FUZZY_CACHE_PATH)
+except Exception:
+    fuzzy_cache = {}
 import requests
 import mwparserfromhell
 import re
@@ -67,8 +32,6 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 import networkx as nx
 from tqdm import tqdm
-# Global progress bar (initialized in __main__); keep None for safe imports
-progress_bar = None
 from collections import Counter, defaultdict, deque
 from fuzzywuzzy import process, fuzz
 from selenium.webdriver.support.ui import WebDriverWait
@@ -130,35 +93,20 @@ researcher_candidate_labels = researcher_labels + non_research_labels
 SAVE_EVERY = 5
 MAX_CRAWL_DEPTH = 800000000000
 SEED_USER_ID = "kukA0LcAAAAJ"  # Yoshua Bengio
-DATA_FILE = "../../data/processed/scholar_profiles.csv"
-PROGRESS_CSV = "../../data/processed/scholar_profiles.csv"
-GRAPH_GRAPHML = "../../outputs/coauthor_network_progress.graphml"
-QUEUE_FILE = "../../cache/queue.txt"
+PROGRESS_CSV = "data/processed/scholar_profiles.csv"
+GRAPH_GRAPHML = "cache/coauthor_network_progressssss.graphml"
+QUEUE_FILE = "cache/queue.txt"
 MAX_CRAWL_SECONDS = 3600000
-FUZZY_CACHE_PATH = "../../cache/fuzzy_match_cache.json"
+FUZZY_CACHE_PATH = "cache/fuzzy_match_cache.joblib"
 
-ICLR_PARQUET_PATH = '../../data/raw/iclr_2020_2025_combined_data.parquet'
-NEURIPS_PARQUET_PATH = '../../data/raw/neurips_2020_2024_combined_data.parquet'
+ICLR_PARQUET_PATH = 'data/raw/iclr_2020_2025.parquet'
+NEURIPS_PARQUET_PATH = 'data/raw/neurips_2020_2024_combined_data.parquet'
 FUZZY_RUN_INTERVAL = 5
 phrase_to_topics = {}
 
-# Resolve key file paths to absolute locations inside the repository (avoid creating dirs outside)
-def _resolve_repo_path(p):
-    if os.path.isabs(p):
-        return os.path.normpath(p)
-    return os.path.normpath(os.path.join(script_dir, p))
-
-DATA_FILE = _resolve_repo_path(DATA_FILE)
-PROGRESS_CSV = _resolve_repo_path(PROGRESS_CSV)
-GRAPH_GRAPHML = _resolve_repo_path(GRAPH_GRAPHML)
-QUEUE_FILE = _resolve_repo_path(QUEUE_FILE)
-FUZZY_CACHE_PATH = _resolve_repo_path(FUZZY_CACHE_PATH)
-ICLR_PARQUET_PATH = _resolve_repo_path(ICLR_PARQUET_PATH)
-NEURIPS_PARQUET_PATH = _resolve_repo_path(NEURIPS_PARQUET_PATH)
-
 # === BATCH TUNING ===
 BATCH_SIZE = 100  # Number of profiles to process per batch
-SAVE_INTERVAL = 500  # Number of processed profiles before saving progress
+SAVE_INTERVAL = 100  # Number of processed profiles before saving progress
 
 # Load conference data once for fuzzy matching (module scope)
 iclr_df = pd.read_parquet(ICLR_PARQUET_PATH) if os.path.exists(ICLR_PARQUET_PATH) else None
@@ -498,8 +446,8 @@ async def async_get_author_wikipedia_info(session, author_name):
         info = {k: "" for k in fields}
         info.update({"deceased": "False", "wiki_summary": "", "is_researcher_ml": "False", "matched_title": ""})
         wiki_cache[author_name] = info
-    _safe_save_joblib(wiki_cache, WIKI_CACHE_PATH)
-    return info
+        joblib.dump(wiki_cache, WIKI_CACHE_PATH)
+        return info
     info, matched_title = await async_get_selected_infobox_fields(session, matched_title, fields)
     if info is None:
         info = {k: "" for k in fields}
@@ -513,7 +461,7 @@ async def async_get_author_wikipedia_info(session, author_name):
         "matched_title": matched_title or ""
     })
     wiki_cache[author_name] = info
-    _safe_save_joblib(wiki_cache, WIKI_CACHE_PATH)
+    joblib.dump(wiki_cache, WIKI_CACHE_PATH)
     return info
 
 # === UTILITY FUNCTIONS ===
@@ -650,27 +598,21 @@ def extract_profile(driver, user_id, depth, parent_id=None):
 # === FILE MANAGEMENT ===
 def ensure_progress_csv(path):
     """Ensure progress CSV exists with proper columns"""
-    # Resolve relative paths against script_dir to avoid creating dirs outside the repo
-    resolved = path if os.path.isabs(path) else os.path.normpath(os.path.join(script_dir, path))
-    parent = os.path.dirname(resolved) or "."
-    os.makedirs(parent, exist_ok=True)
-    if not os.path.exists(resolved) or os.path.getsize(resolved) == 0:
-        pd.DataFrame(columns=EXPECTED_COLUMNS).to_csv(resolved, index=False)
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        pd.DataFrame(columns=EXPECTED_COLUMNS).to_csv(path, index=False)
     else:
         try:
-            df = pd.read_csv(resolved, low_memory=False)
+            df = pd.read_csv(path, low_memory=False)
             missing_cols = [col for col in EXPECTED_COLUMNS if col not in df.columns]
             if missing_cols:
-                pd.DataFrame(columns=EXPECTED_COLUMNS).to_csv(resolved, index=False)
+                pd.DataFrame(columns=EXPECTED_COLUMNS).to_csv(path, index=False)
         except Exception:
-            pd.DataFrame(columns=EXPECTED_COLUMNS).to_csv(resolved, index=False)
+            pd.DataFrame(columns=EXPECTED_COLUMNS).to_csv(path, index=False)
 
 def save_progress(profiles, _graph=None):
     """Save profiles to CSV"""
     df = pd.DataFrame(profiles)
-    resolved = PROGRESS_CSV if os.path.isabs(PROGRESS_CSV) else os.path.normpath(os.path.join(script_dir, PROGRESS_CSV))
-    os.makedirs(os.path.dirname(resolved) or '.', exist_ok=True)
-    df.to_csv(resolved, index=False)
+    df.to_csv(PROGRESS_CSV, index=False)
 
 # === QUEUE MANAGEMENT ===
 def load_queue():
@@ -692,9 +634,7 @@ def load_queue():
 
 def save_queue(queue):
     """Save queue to file"""
-    resolved = QUEUE_FILE if os.path.isabs(QUEUE_FILE) else os.path.normpath(os.path.join(script_dir, QUEUE_FILE))
-    os.makedirs(os.path.dirname(resolved) or '.', exist_ok=True)
-    with open(resolved, "w") as f:
+    with open(QUEUE_FILE, "w") as f:
         for item in queue:
             f.write(json.dumps(item) + "\n")
 
@@ -752,7 +692,7 @@ def fuzzy_match_conference_participation(profile, conf_name, df, name_col='Autho
         profile[f"Participated_in_{conf_name}"] = False
         profile[f"{conf_name}_Institution"] = ""
     fuzzy_cache[cache_key] = (str(match), str(score), str(matched_institution))
-    _safe_save_json(fuzzy_cache, FUZZY_CACHE_PATH)
+    joblib.dump(fuzzy_cache, FUZZY_CACHE_PATH)
 
 def run_fuzzy_matching_single(profile):
     """Run fuzzy matching for a single profile"""
@@ -852,7 +792,7 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
     """Main BFS crawling function with batched multiprocessing enrichment"""
     start_time = time.time()
     total_scraped = 0
-    INSERT_FILE = "../../cache/queue_insert.jsonl"
+    INSERT_FILE = "queue_insert.jsonl"
     INSERT_CHECK_INTERVAL = 30
     last_insert_check = time.time()
 
@@ -921,8 +861,7 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
             profile_batch = []
             batch_since_save += len(enriched_profiles)
             print(f"✅ Processed {total_scraped} profiles so far | Batch size: {BATCH_SIZE} | Time: {batch_time:.2f}s")
-            if progress_bar:
-                progress_bar.update(len(enriched_profiles))
+            progress_bar.update(len(enriched_profiles))
             # Only save after each batch, not after every profile
             if batch_since_save >= SAVE_INTERVAL:
                 save_queue(queue)
@@ -941,7 +880,6 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
 
 # === MAIN EXECUTION ===
 if __name__ == "__main__":
-    # Using configured BATCH_SIZE and SAVE_INTERVAL from top-level config
     # Initialize globals
     phrase_to_topics = {}
     driver = get_driver()
@@ -982,9 +920,5 @@ if __name__ == "__main__":
         crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=True)
         print("✅ Crawling complete!")
     finally:
-        if progress_bar:
-            try:
-                progress_bar.close()
-            except Exception:
-                pass
+        progress_bar.close()
         driver.quit()
