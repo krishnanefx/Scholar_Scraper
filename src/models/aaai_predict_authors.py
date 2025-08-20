@@ -7,6 +7,9 @@ Consistent with NeurIPS and ICLR prediction models
 from sklearn.calibration import CalibratedClassifierCV
 import pandas as pd
 import numpy as np
+import os
+import argparse
+import warnings
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split, GridSearchCV, GroupKFold
@@ -123,335 +126,362 @@ def adjust_probability_with_logic(row, raw_prob):
         adjusted_prob = min(1.0, adjusted_prob * 1.2)
     
     return adjusted_prob
+def resolve_data_path(path_like: str) -> str:
+    if os.path.isabs(path_like):
+        return os.path.normpath(path_like)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(script_dir, '..', '..', path_like))
 
-# Load the data
-print("Loading AAAI data...")
-# Show working directory for debugging
-print(f"Current working directory: {os.getcwd()}")
 
-# Resolve data path relative to this script so the script works when run
-# from project root, from src/models, or elsewhere.
-script_dir = os.path.dirname(os.path.abspath(__file__))
-data_path = os.path.normpath(os.path.join(script_dir, '..', '..', 'data', 'raw', 'aaai25_papers_authors_split.csv'))
-if not os.path.exists(data_path):
-    print(f"Error: Could not find aaai25_papers_authors_split.csv at {data_path}")
-    exit(1)
+def main():
+    parser = argparse.ArgumentParser(description='AAAI author participation predictor')
+    parser.add_argument('--data-path', help='Path to input CSV file', default=None)
+    parser.add_argument('--output-dir', help='Directory to write predictions', default=None)
+    parser.add_argument('--model-path', help='Path to save trained model', default=None)
+    parser.add_argument('--quiet-warnings', action='store_true', help='Suppress numpy runtime warnings during training')
+    args = parser.parse_args()
 
-df = pd.read_csv(data_path)
+    default_data = 'data/raw/aaai25_papers_authors_split.csv'
+    default_output_dir = 'data/predictions'
+    default_model_path = 'data/processed/aaai_participation_model.pkl'
 
-# Data preprocessing
-df['author'] = df['author'].fillna('').apply(normalize_author)
-df = df[df['author'] != '']
-df = df.dropna(subset=['year'])
-df['year'] = df['year'].astype(int)
+    data_path = args.data_path or os.environ.get('AAAI_DATA_PATH') or default_data
+    data_path = resolve_data_path(data_path)
 
-print(f"Data loaded: {len(df)} paper-author pairs")
-print(f"Unique authors: {df['author'].nunique()}")
-print(f"Years covered: {df['year'].min()} to {df['year'].max()}")
+    output_dir = args.output_dir or os.environ.get('AAAI_OUTPUT_DIR') or default_output_dir
+    output_dir = resolve_data_path(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
-# Years setup - dynamic prediction year
-all_years_full = sorted(df['year'].unique())
-min_year, max_year = min(all_years_full), max(all_years_full)
-prediction_year = max_year + 1  # Dynamic prediction year
-print(f"=== AAAI {prediction_year} Author Participation Prediction ===")
-print(f"Data available through {max_year}, predicting for {prediction_year}")
+    model_path = args.model_path or os.environ.get('AAAI_MODEL_PATH') or default_model_path
+    model_path = resolve_data_path(model_path)
 
-# Use all years except target for features
-all_years = all_years_full[:-1] if len(all_years_full) > 1 else all_years_full
-print(f"Feature engineering using years: {min(all_years)} to {max(all_years)}")
-print(f"Predicting participation for: {prediction_year}")
+    if args.quiet_warnings:
+        warnings.filterwarnings('ignore', category=RuntimeWarning)
 
-# Feature engineering
-print("Extracting features...")
-author_years = df.groupby('author')['year'].apply(list).reset_index()
-author_features = []
+    print("Loading AAAI data...")
+    print(f"Current working directory: {os.getcwd()}")
 
-for _, row in author_years.iterrows():
-    features = get_year_features(row['year'], all_years)
-    features['author'] = row['author']
-    author_features.append(features)
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Could not find aaai CSV at {data_path}")
 
-# Create feature matrix
-author_df = pd.DataFrame(author_features)
-print(f"Features extracted for {len(author_df)} authors")
+    df = pd.read_csv(data_path)
+    # delegate to pipeline helper
+    run_pipeline(df, output_dir, model_path)
 
-# CRITICAL: Separate training and prediction datasets
-# Training: Only authors with ≥2 participations for reliable patterns
-# Prediction: ALL authors (including newcomers)
 
-training_authors = author_df[author_df['num_participations'] >= 2]['author'].tolist()
-training_data = author_df[author_df['author'].isin(training_authors)].copy()
+def run_pipeline(df, output_dir, model_path):
+    # Data preprocessing
+    df['author'] = df['author'].fillna('').apply(normalize_author)
+    df = df[df['author'] != '']
+    df = df.dropna(subset=['year'])
+    df['year'] = df['year'].astype(int)
 
-# Create target: did they participate in the most recent year?
-training_data['target'] = training_data['author'].isin(
-    df[df['year'] == max_year]['author']
-).astype(int)
+    print(f"Data loaded: {len(df)} paper-author pairs")
+    print(f"Unique authors: {df['author'].nunique()}")
+    print(f"Years covered: {df['year'].min()} to {df['year'].max()}")
 
-print(f"Training dataset: {len(training_data)} authors with ≥2 participations")
-print(f"Target distribution: {training_data['target'].value_counts().to_dict()}")
+    # Years setup - dynamic prediction year
+    all_years_full = sorted(df['year'].unique())
+    min_year, max_year = min(all_years_full), max(all_years_full)
+    prediction_year = max_year + 1  # Dynamic prediction year
+    print(f"=== AAAI {prediction_year} Author Participation Prediction ===")
+    print(f"Data available through {max_year}, predicting for {prediction_year}")
 
-# Features for modeling
-feature_cols = [col for col in training_data.columns if col not in ['author', 'target']]
-print(f"Using {len(feature_cols)} features")
+    # Use all years except target for features
+    all_years = all_years_full[:-1] if len(all_years_full) > 1 else all_years_full
+    print(f"Feature engineering using years: {min(all_years)} to {max(all_years)}")
+    print(f"Predicting participation for: {prediction_year}")
 
-# Cross-validation
-groups = training_data['author']
-gkf = GroupKFold(n_splits=5)
-cv_results = []
+    # Feature engineering
+    print("Extracting features...")
+    author_years = df.groupby('author')['year'].apply(list).reset_index()
+    author_features = []
 
-print("\nStarting cross-validation...")
-for fold_idx, (train_idx, test_idx) in enumerate(gkf.split(training_data, training_data['target'], groups)):
-    print(f"\nFold {fold_idx + 1}/5")
-    
-    X_train = training_data.iloc[train_idx][feature_cols].fillna(0)
-    y_train = training_data.iloc[train_idx]['target']
-    X_test = training_data.iloc[test_idx][feature_cols].fillna(0)
-    y_test = training_data.iloc[test_idx]['target']
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_train_scaled = clean_features(X_train_scaled)
-    X_test_scaled = scaler.transform(X_test)
-    X_test_scaled = clean_features(X_test_scaled)
-    
-    # Feature selection
-    selector = SelectKBest(f_classif, k=min(15, len(feature_cols)))
-    X_train_selected = selector.fit_transform(X_train_scaled, y_train)
-    X_test_selected = selector.transform(X_test_scaled)
-    
-    # Models with conservative parameters
-    gb = GradientBoostingClassifier(
-        random_state=42, 
-        max_depth=3, 
-        min_samples_split=20, 
-        min_samples_leaf=10,
+    for _, row in author_years.iterrows():
+        features = get_year_features(row['year'], all_years)
+        features['author'] = row['author']
+        author_features.append(features)
+
+    # Create feature matrix
+    author_df = pd.DataFrame(author_features)
+    print(f"Features extracted for {len(author_df)} authors")
+
+    # CRITICAL: Separate training and prediction datasets
+    training_authors = author_df[author_df['num_participations'] >= 2]['author'].tolist()
+    training_data = author_df[author_df['author'].isin(training_authors)].copy()
+
+    # Create target: did they participate in the most recent year?
+    training_data['target'] = training_data['author'].isin(
+        df[df['year'] == max_year]['author']
+    ).astype(int)
+
+    print(f"Training dataset: {len(training_data)} authors with ≥2 participations")
+    print(f"Target distribution: {training_data['target'].value_counts().to_dict()}")
+
+    # Features for modeling
+    feature_cols = [col for col in training_data.columns if col not in ['author', 'target']]
+    print(f"Using {len(feature_cols)} features")
+
+    # Cross-validation
+    groups = training_data['author']
+    gkf = GroupKFold(n_splits=5)
+    cv_results = []
+
+    print("\nStarting cross-validation...")
+    for fold_idx, (train_idx, test_idx) in enumerate(gkf.split(training_data, training_data['target'], groups)):
+        print(f"\nFold {fold_idx + 1}/5")
+
+        X_train = training_data.iloc[train_idx][feature_cols].fillna(0)
+        y_train = training_data.iloc[train_idx]['target']
+        X_test = training_data.iloc[test_idx][feature_cols].fillna(0)
+        y_test = training_data.iloc[test_idx]['target']
+
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_train_scaled = clean_features(X_train_scaled)
+        X_test_scaled = scaler.transform(X_test)
+        X_test_scaled = clean_features(X_test_scaled)
+
+        # Feature selection
+        selector = SelectKBest(f_classif, k=min(15, len(feature_cols)))
+        X_train_selected = selector.fit_transform(X_train_scaled, y_train)
+        X_test_selected = selector.transform(X_test_scaled)
+
+        # Models with conservative parameters
+        gb = GradientBoostingClassifier(
+            random_state=42,
+            max_depth=3,
+            min_samples_split=20,
+            min_samples_leaf=10,
+            n_estimators=100,
+            learning_rate=0.05
+        )
+
+        lr = LogisticRegression(
+            max_iter=5000,
+            random_state=42,
+            penalty='l2',
+            C=0.1
+        )
+
+        # Ensemble
+        ensemble = VotingClassifier(
+            estimators=[('gb', gb), ('lr', lr)],
+            voting='soft'
+        )
+
+        ensemble.fit(X_train_selected, y_train)
+
+        # Calibration
+        calibrated = CalibratedClassifierCV(ensemble, method='isotonic', cv=3)
+        calibrated.fit(X_train_selected, y_train)
+
+        # Predictions
+        y_pred = calibrated.predict(X_test_selected)
+        y_proba = calibrated.predict_proba(X_test_selected)[:, 1]
+
+        # Metrics
+        if len(np.unique(y_test)) == 2:
+            auc = roc_auc_score(y_test, y_proba)
+            precision = precision_score(y_test, y_pred)
+            recall = recall_score(y_test, y_pred)
+            f1 = f1_score(y_test, y_pred)
+            print(f"AUC: {auc:.3f}, Precision: {precision:.3f}, Recall: {recall:.3f}, F1: {f1:.3f}")
+            cv_results.append({'auc': auc, 'precision': precision, 'recall': recall, 'f1': f1})
+        else:
+            print("Warning: Only one class in test set")
+            cv_results.append({'auc': np.nan, 'precision': np.nan, 'recall': np.nan, 'f1': np.nan})
+
+    # Overall CV results
+    valid_results = [r for r in cv_results if not np.isnan(r['auc'])]
+    if valid_results:
+        print(f"\nOverall CV Results:")
+        print(f"AUC: {np.mean([r['auc'] for r in valid_results]):.3f}")
+        print(f"Precision: {np.mean([r['precision'] for r in valid_results]):.3f}")
+        print(f"Recall: {np.mean([r['recall'] for r in valid_results]):.3f}")
+        print(f"F1: {np.mean([r['f1'] for r in valid_results]):.3f}")
+
+    # Train final model
+    print("\nTraining final model...")
+    X_final = training_data[feature_cols].fillna(0)
+    y_final = training_data['target']
+
+    scaler_final = StandardScaler()
+    X_final_scaled = scaler_final.fit_transform(X_final)
+    X_final_scaled = clean_features(X_final_scaled)
+
+    selector_final = SelectKBest(f_classif, k=min(15, len(feature_cols)))
+    X_final_selected = selector_final.fit_transform(X_final_scaled, y_final)
+
+    # Final ensemble
+    gb_final = GradientBoostingClassifier(
+        random_state=42,
         n_estimators=100,
-        learning_rate=0.05
+        learning_rate=0.05,
+        max_depth=3,
+        min_samples_split=20,
+        min_samples_leaf=10
     )
-    
-    lr = LogisticRegression(
-        max_iter=5000, 
-        random_state=42, 
-        penalty='l2',
-        C=0.1
+
+    lr_final = LogisticRegression(
+        max_iter=5000,
+        random_state=42,
+        C=0.1,
+        penalty='l2'
     )
-    
-    # Ensemble
-    ensemble = VotingClassifier(
-        estimators=[('gb', gb), ('lr', lr)], 
+
+    ensemble_final = VotingClassifier(
+        estimators=[('gb', gb_final), ('lr', lr_final)],
         voting='soft'
     )
-    
-    ensemble.fit(X_train_selected, y_train)
-    
-    # Calibration
-    calibrated = CalibratedClassifierCV(ensemble, method='isotonic', cv=3)
-    calibrated.fit(X_train_selected, y_train)
-    
-    # Predictions
-    y_pred = calibrated.predict(X_test_selected)
-    y_proba = calibrated.predict_proba(X_test_selected)[:, 1]
-    
-    # Metrics
-    if len(np.unique(y_test)) == 2:
-        auc = roc_auc_score(y_test, y_proba)
-        precision = precision_score(y_test, y_pred)
-        recall = recall_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred)
-        print(f"AUC: {auc:.3f}, Precision: {precision:.3f}, Recall: {recall:.3f}, F1: {f1:.3f}")
-        cv_results.append({'auc': auc, 'precision': precision, 'recall': recall, 'f1': f1})
-    else:
-        print("Warning: Only one class in test set")
-        cv_results.append({'auc': np.nan, 'precision': np.nan, 'recall': np.nan, 'f1': np.nan})
 
-# Overall CV results
-valid_results = [r for r in cv_results if not np.isnan(r['auc'])]
-if valid_results:
-    print(f"\nOverall CV Results:")
-    print(f"AUC: {np.mean([r['auc'] for r in valid_results]):.3f}")
-    print(f"Precision: {np.mean([r['precision'] for r in valid_results]):.3f}")
-    print(f"Recall: {np.mean([r['recall'] for r in valid_results]):.3f}")
-    print(f"F1: {np.mean([r['f1'] for r in valid_results]):.3f}")
+    ensemble_final.fit(X_final_selected, y_final)
 
-# Train final model
-print("\nTraining final model...")
-X_final = training_data[feature_cols].fillna(0)
-y_final = training_data['target']
+    # Apply calibration
+    calibrated_final = CalibratedClassifierCV(ensemble_final, method='isotonic', cv=3)
+    calibrated_final.fit(X_final_selected, y_final)
 
-scaler_final = StandardScaler()
-X_final_scaled = scaler_final.fit_transform(X_final)
-X_final_scaled = clean_features(X_final_scaled)
+    # Generate predictions for ALL authors
+    print(f"\nGenerating predictions for all {len(author_df)} authors...")
 
-selector_final = SelectKBest(f_classif, k=min(15, len(feature_cols)))
-X_final_selected = selector_final.fit_transform(X_final_scaled, y_final)
+    X_all = author_df[feature_cols].fillna(0)
+    X_all_scaled = scaler_final.transform(X_all)
+    X_all_scaled = clean_features(X_all_scaled)
+    X_all_selected = selector_final.transform(X_all_scaled)
 
-# Final ensemble
-gb_final = GradientBoostingClassifier(
-    random_state=42, 
-    n_estimators=100, 
-    learning_rate=0.05,
-    max_depth=3, 
-    min_samples_split=20, 
-    min_samples_leaf=10
-)
+    # Get raw probabilities
+    raw_probabilities = calibrated_final.predict_proba(X_all_selected)[:, 1]
 
-lr_final = LogisticRegression(
-    max_iter=5000, 
-    random_state=42, 
-    C=0.1, 
-    penalty='l2'
-)
+    # Apply logic-based adjustments
+    author_df['raw_probability'] = raw_probabilities
+    author_df['adjusted_probability'] = author_df.apply(
+        lambda row: adjust_probability_with_logic(row, row['raw_probability']), axis=1
+    )
 
-ensemble_final = VotingClassifier(
-    estimators=[('gb', gb_final), ('lr', lr_final)], 
-    voting='soft'
-)
+    final_probabilities = author_df['adjusted_probability'].values
 
-ensemble_final.fit(X_final_selected, y_final)
+    # Conservative threshold: Use 85th percentile of TRAINING authors only
+    training_probs = []
+    for idx, author in enumerate(author_df['author']):
+        if author in training_authors:
+            training_probs.append(final_probabilities[idx])
 
-# Apply calibration
-calibrated_final = CalibratedClassifierCV(ensemble_final, method='isotonic', cv=3)
-calibrated_final.fit(X_final_selected, y_final)
+    conservative_threshold = np.percentile(training_probs, 85) if training_probs else 0.5
+    final_predictions = np.array(np.array(final_probabilities) >= conservative_threshold, dtype=int)
 
-# Generate predictions for ALL authors
-print(f"\nGenerating predictions for all {len(author_df)} authors...")
+    # Detailed threshold analysis
+    print(f"\n=== Threshold Selection Analysis ===")
+    print(f"Selected threshold: {conservative_threshold:.3f} (85th percentile of training data)")
 
-X_all = author_df[feature_cols].fillna(0)
-X_all_scaled = scaler_final.transform(X_all)
-X_all_scaled = clean_features(X_all_scaled)
-X_all_selected = selector_final.transform(X_all_scaled)
+    # Calculate different threshold scenarios
+    thresholds_to_test = [0.5, 0.6, 0.7, conservative_threshold, 0.8, 0.9]
+    print(f"\nThreshold sensitivity analysis:")
+    for thresh in thresholds_to_test:
+        pred_count = (np.array(final_probabilities) >= thresh).sum()
+        percentage = (pred_count / len(final_probabilities)) * 100
+        if thresh == conservative_threshold:
+            print(f"  Threshold {thresh:.3f}: {pred_count:4d} authors ({percentage:.1f}% of total) ← SELECTED")
+        else:
+            print(f"  Threshold {thresh:.3f}: {pred_count:4d} authors ({percentage:.1f}% of total)")
 
-# Get raw probabilities
-raw_probabilities = calibrated_final.predict_proba(X_all_selected)[:, 1]
+    print(f"\nWhy threshold {conservative_threshold:.3f} was chosen:")
+    print(f"  • 85th percentile ensures we capture highly likely participants")
+    print(f"  • Conservative approach: prefers fewer false positives over false negatives")
+    print(f"  • Historically, ~6-9% of eligible authors participate in subsequent AAAI conferences")
+    print(f"  • This threshold predicts {((np.array(final_probabilities) >= conservative_threshold).sum() / len(final_probabilities)) * 100:.1f}% participation rate")
 
-# Apply logic-based adjustments
-author_df['raw_probability'] = raw_probabilities
-author_df['adjusted_probability'] = author_df.apply(
-    lambda row: adjust_probability_with_logic(row, row['raw_probability']), axis=1
-)
+    # Feature importance analysis
+    print(f"\n=== Feature Importance Analysis ===")
+    feature_names = ['num_participations', 'years_since_last', 'participation_rate', 
+                    'co_author_network_strength', 'recent_productivity', 'collaboration_diversity']
 
-final_probabilities = author_df['adjusted_probability'].values
+    # Get feature importance from the Gradient Boosting estimator
+    try:
+        if hasattr(ensemble_final.named_estimators_['gb'], 'feature_importances_'):
+            importances = ensemble_final.named_estimators_['gb'].feature_importances_
+            print("Key factors determining participation likelihood (from Gradient Boosting model):")
+            for i, (feature, importance) in enumerate(zip(feature_names, importances)):
+                print(f"  {i+1}. {feature.replace('_', ' ').title()}: {importance:.3f} ({importance*100:.1f}%)")
+        else:
+            print("Feature importance analysis not available for this model type")
+    except Exception as e:
+        print(f"Feature importance analysis not available: {str(e)}")
 
-# Conservative threshold: Use 85th percentile of TRAINING authors only
-training_probs = []
-for idx, author in enumerate(author_df['author']):
-    if author in training_authors:
-        training_probs.append(final_probabilities[idx])
+    print(f"\nWhat makes authors highly likely to participate:")
+    print(f"  • Recent participation (within last 1-2 years)")
+    print(f"  • High historical participation rate (>2.5 papers per year)")
+    print(f"  • Strong co-authorship networks with other frequent participants")
+    print(f"  • Consistent publication pattern in AAAI venues")
+    print(f"  • Active collaboration with diverse research groups")
 
-conservative_threshold = np.percentile(training_probs, 85) if training_probs else 0.5
-final_predictions = np.array(np.array(final_probabilities) >= conservative_threshold, dtype=int)
+    # Prepare final output in consistent format
+    results = []
+    for idx, row in author_df.iterrows():
+        results.append({
+            'predicted_author': row['author'],
+            f'will_participate_{prediction_year}': final_predictions[idx],
+            'participation_probability': final_probabilities[idx],
+            'confidence_percent': final_probabilities[idx] * 100,
+            'num_participations': int(row['num_participations']),
+            'years_since_last': int(row['years_since_last']),
+            'participation_rate': row['participation_rate'],
+            'rank': 0  # Will be set after sorting
+        })
 
-# Detailed threshold analysis
-print(f"\n=== Threshold Selection Analysis ===")
-print(f"Selected threshold: {conservative_threshold:.3f} (85th percentile of training data)")
+    # Create results DataFrame
+    results_df = pd.DataFrame(results)
+    results_df = results_df.sort_values('participation_probability', ascending=False)
+    results_df['rank'] = range(1, len(results_df) + 1)
 
-# Calculate different threshold scenarios
-thresholds_to_test = [0.5, 0.6, 0.7, conservative_threshold, 0.8, 0.9]
-print(f"\nThreshold sensitivity analysis:")
-for thresh in thresholds_to_test:
-    pred_count = (np.array(final_probabilities) >= thresh).sum()
-    percentage = (pred_count / len(final_probabilities)) * 100
-    if thresh == conservative_threshold:
-        print(f"  Threshold {thresh:.3f}: {pred_count:4d} authors ({percentage:.1f}% of total) ← SELECTED")
-    else:
-        print(f"  Threshold {thresh:.3f}: {pred_count:4d} authors ({percentage:.1f}% of total)")
+    # Save results to correct location
+    output_path = os.path.join(output_dir, f'aaai_{prediction_year}_predictions.csv')
+    results_df.to_csv(output_path, index=False)
 
-print(f"\nWhy threshold {conservative_threshold:.3f} was chosen:")
-print(f"  • 85th percentile ensures we capture highly likely participants")
-print(f"  • Conservative approach: prefers fewer false positives over false negatives")
-print(f"  • Historically, ~6-9% of eligible authors participate in subsequent AAAI conferences")
-print(f"  • This threshold predicts {((np.array(final_probabilities) >= conservative_threshold).sum() / len(final_probabilities)) * 100:.1f}% participation rate")
+    # Save model
+    joblib.dump(calibrated_final, model_path)
 
-# Feature importance analysis
-print(f"\n=== Feature Importance Analysis ===")
-feature_names = ['num_participations', 'years_since_last', 'participation_rate', 
-                'co_author_network_strength', 'recent_productivity', 'collaboration_diversity']
+    # Print summary
+    print(f"\n=== AAAI {prediction_year} Predictions Complete ===")
+    print(f"Total authors analyzed: {len(results_df)}")
+    print(f"Authors predicted to participate: {final_predictions.sum()}")
+    print(f"Conservative threshold: {conservative_threshold:.3f}")
 
-# Get feature importance from the Gradient Boosting estimator
-try:
-    if hasattr(ensemble_final.named_estimators_['gb'], 'feature_importances_'):
-        importances = ensemble_final.named_estimators_['gb'].feature_importances_
-        print("Key factors determining participation likelihood (from Gradient Boosting model):")
-        for i, (feature, importance) in enumerate(zip(feature_names, importances)):
-            print(f"  {i+1}. {feature.replace('_', ' ').title()}: {importance:.3f} ({importance*100:.1f}%)")
-    else:
-        print("Feature importance analysis not available for this model type")
-except Exception as e:
-    print(f"Feature importance analysis not available: {str(e)}")
+    # Top predictions
+    predicted_participants = results_df[results_df[f'will_participate_{prediction_year}'] == 1]
+    print(f"\nTop 10 most likely to participate:")
+    for _, row in predicted_participants.head(10).iterrows():
+        # Calculate reason for high prediction
+        reasons = []
+        if row['num_participations'] >= 8:
+            reasons.append(f"prolific author ({row['num_participations']} papers)")
+        if row['years_since_last'] <= 1:
+            reasons.append("very recent participation")
+        elif row['years_since_last'] <= 2:
+            reasons.append("recent participation")
+        if row['participation_rate'] >= 2.5:
+            reasons.append(f"high productivity ({row['participation_rate']:.1f} papers/year)")
+        elif row['participation_rate'] >= 1.5:
+            reasons.append(f"consistent productivity ({row['participation_rate']:.1f} papers/year)")
 
-print(f"\nWhat makes authors highly likely to participate:")
-print(f"  • Recent participation (within last 1-2 years)")
-print(f"  • High historical participation rate (>2.5 papers per year)")
-print(f"  • Strong co-authorship networks with other frequent participants")
-print(f"  • Consistent publication pattern in AAAI venues")
-print(f"  • Active collaboration with diverse research groups")
+        reason_str = ", ".join(reasons) if reasons else "strong overall profile"
+        print(f"{row['predicted_author']}: {row['participation_probability']:.3f} ({row['confidence_percent']:.1f}% confidence)")
+        print(f"   └─ Why: {reason_str}")
 
-# Prepare final output in consistent format
-results = []
-for idx, row in author_df.iterrows():
-    results.append({
-        'predicted_author': row['author'],
-        f'will_participate_{prediction_year}': final_predictions[idx],
-        'participation_probability': final_probabilities[idx],
-        'confidence_percent': final_probabilities[idx] * 100,
-        'num_participations': int(row['num_participations']),
-        'years_since_last': int(row['years_since_last']),
-        'participation_rate': row['participation_rate'],
-        'rank': 0  # Will be set after sorting
-    })
+    # Analyze prediction patterns
+    print(f"\n=== AAAI Prediction Pattern Analysis ===")
+    print(f"Characteristics of predicted participants:")
+    print(f"  • Average past participations: {predicted_participants['num_participations'].mean():.1f}")
+    print(f"  • Average years since last: {predicted_participants['years_since_last'].mean():.1f}")
+    print(f"  • Average participation rate: {predicted_participants['participation_rate'].mean():.1f} papers/year")
+    print(f"  • Recent participants (≤2 years): {(predicted_participants['years_since_last'] <= 2).sum()} ({(predicted_participants['years_since_last'] <= 2).sum() / len(predicted_participants) * 100:.1f}%)")
+    print(f"  • Prolific authors (≥8 papers): {(predicted_participants['num_participations'] >= 8).sum()} ({(predicted_participants['num_participations'] >= 8).sum() / len(predicted_participants) * 100:.1f}%)")
+    print(f"  • High productivity (≥2.5 papers/year): {(predicted_participants['participation_rate'] >= 2.5).sum()} ({(predicted_participants['participation_rate'] >= 2.5).sum() / len(predicted_participants) * 100:.1f}%)")
 
-# Create results DataFrame
-results_df = pd.DataFrame(results)
-results_df = results_df.sort_values('participation_probability', ascending=False)
-results_df['rank'] = range(1, len(results_df) + 1)
+    print(f"\nPredictions saved to: {output_path}")
+    print(f"Model saved as: {model_path}")
+    print("Done!")
 
-# Save results to correct location
-output_path = f'../../data/predictions/aaai_{prediction_year}_predictions.csv'
-results_df.to_csv(output_path, index=False)
 
-# Save model
-model_path = '../../data/processed/aaai_participation_model.pkl'
-
-joblib.dump(calibrated_final, model_path)
-
-# Print summary
-print(f"\n=== AAAI {prediction_year} Predictions Complete ===")
-print(f"Total authors analyzed: {len(results_df)}")
-print(f"Authors predicted to participate: {final_predictions.sum()}")
-print(f"Conservative threshold: {conservative_threshold:.3f}")
-
-# Top predictions
-predicted_participants = results_df[results_df[f'will_participate_{prediction_year}'] == 1]
-print(f"\nTop 10 most likely to participate:")
-for _, row in predicted_participants.head(10).iterrows():
-    # Calculate reason for high prediction
-    reasons = []
-    if row['num_participations'] >= 8:
-        reasons.append(f"prolific author ({row['num_participations']} papers)")
-    if row['years_since_last'] <= 1:
-        reasons.append("very recent participation")
-    elif row['years_since_last'] <= 2:
-        reasons.append("recent participation")
-    if row['participation_rate'] >= 2.5:
-        reasons.append(f"high productivity ({row['participation_rate']:.1f} papers/year)")
-    elif row['participation_rate'] >= 1.5:
-        reasons.append(f"consistent productivity ({row['participation_rate']:.1f} papers/year)")
-    
-    reason_str = ", ".join(reasons) if reasons else "strong overall profile"
-    print(f"{row['predicted_author']}: {row['participation_probability']:.3f} ({row['confidence_percent']:.1f}% confidence)")
-    print(f"   └─ Why: {reason_str}")
-
-# Analyze prediction patterns
-print(f"\n=== AAAI Prediction Pattern Analysis ===")
-print(f"Characteristics of predicted participants:")
-print(f"  • Average past participations: {predicted_participants['num_participations'].mean():.1f}")
-print(f"  • Average years since last: {predicted_participants['years_since_last'].mean():.1f}")
-print(f"  • Average participation rate: {predicted_participants['participation_rate'].mean():.1f} papers/year")
-print(f"  • Recent participants (≤2 years): {(predicted_participants['years_since_last'] <= 2).sum()} ({(predicted_participants['years_since_last'] <= 2).sum() / len(predicted_participants) * 100:.1f}%)")
-print(f"  • Prolific authors (≥8 papers): {(predicted_participants['num_participations'] >= 8).sum()} ({(predicted_participants['num_participations'] >= 8).sum() / len(predicted_participants) * 100:.1f}%)")
-print(f"  • High productivity (≥2.5 papers/year): {(predicted_participants['participation_rate'] >= 2.5).sum()} ({(predicted_participants['participation_rate'] >= 2.5).sum() / len(predicted_participants) * 100:.1f}%)")
-
-print(f"\nPredictions saved to: {output_path}")
-print(f"Model saved as: {model_path}")
-print("Done!")
+if __name__ == '__main__':
+    main()

@@ -5,11 +5,15 @@ Creates Excel file with scholar profiles for AAAI, NeurIPS, and ICLR predicted p
 Matches predicted authors with scholar profile database using fuzzy matching
 """
 
+import argparse
+import datetime
+import os
 import pandas as pd
 import numpy as np
 from fuzzywuzzy import fuzz, process
 import re
 from tqdm import tqdm
+import joblib
 
 def clean_name(name):
     """Clean and normalize author names for better matching"""
@@ -57,12 +61,23 @@ def match_authors_with_profiles(predicted_participants, scholar_profiles, confer
     # Prepare results
     matched_results = []
     unmatched_authors = []
+
+    def _get_pred_value(series, base_name, default=''):
+        """Return the first matching column value from a prediction series for a given base name."""
+        # exact match
+        if base_name in series.index:
+            return series[base_name]
+        # look for contains or startswith
+        for col in series.index:
+            if base_name in str(col) or str(col).startswith(base_name):
+                return series[col]
+        return default
     
-    for idx, predicted_row in tqdm(predicted_participants.iterrows(), 
-                                  total=len(predicted_participants), 
+    for idx, predicted_row in tqdm(predicted_participants.iterrows(),
+                                  total=len(predicted_participants),
                                   desc=f"Matching {conference_name}"):
-        predicted_name = predicted_row['clean_name']
-        original_predicted_name = predicted_row['predicted_author']
+        predicted_name = predicted_row.get('clean_name', '')
+        original_predicted_name = predicted_row.get('predicted_author', predicted_row.get('author', ''))
         
         best_match = None
         best_score = 0
@@ -80,27 +95,27 @@ def match_authors_with_profiles(predicted_participants, scholar_profiles, confer
                     matched_scholar_name = match_result[0]
                     best_match = scholar_lookup[matched_scholar_name][0]
                     best_score = match_result[1]
-        
+
         if best_match and best_score >= threshold:
             # Combine prediction data with scholar profile data
             result_row = {
                 # Conference info
                 'Conference': conference_name,
-                
-                # Prediction data
+
+                # Prediction data (use flexible column matching)
                 'Predicted_Author': original_predicted_name,
-                'Will_Participate_2026': predicted_row['will_participate_2026'],
-                'Participation_Probability': predicted_row['participation_probability'],
-                'Confidence_Percent': predicted_row['confidence_percent'],
-                'Prediction_Rank': predicted_row['rank'],
-                'Past_Participations': predicted_row['num_participations'],
-                'Years_Since_Last': predicted_row['years_since_last'],
-                'Participation_Rate': predicted_row['participation_rate'],
-                
+                'Will_Participate': _get_pred_value(predicted_row, 'will_participate'),
+                'Participation_Probability': _get_pred_value(predicted_row, 'participation_probability'),
+                'Confidence_Percent': _get_pred_value(predicted_row, 'confidence_percent'),
+                'Prediction_Rank': _get_pred_value(predicted_row, 'rank'),
+                'Past_Participations': _get_pred_value(predicted_row, 'num_participations'),
+                'Years_Since_Last': _get_pred_value(predicted_row, 'years_since_last'),
+                'Participation_Rate': _get_pred_value(predicted_row, 'participation_rate'),
+
                 # Matching info
                 'Match_Score': best_score,
                 'Scholar_Profile_Name': best_match['original_name'],
-                
+
                 # Scholar profile data
                 'User_ID': best_match['data'].get('user_id', ''),
                 'Position': best_match['data'].get('position', ''),
@@ -114,13 +129,13 @@ def match_authors_with_profiles(predicted_participants, scholar_profiles, confer
                 'H_Index_All': best_match['data'].get('h_index_all', ''),
                 'Topic_Tags': best_match['data'].get('topic_tags', ''),
                 'Coauthors': best_match['data'].get('coauthors', ''),
-                
+
                 # Conference participation history
                 'Participated_in_ICLR': best_match['data'].get('Participated_in_ICLR', ''),
                 'ICLR_Institution': best_match['data'].get('ICLR_Institution', ''),
                 'Participated_in_NeurIPS': best_match['data'].get('Participated_in_NeurIPS', ''),
                 'NeurIPS_Institution': best_match['data'].get('NeurIPS_Institution', ''),
-                
+
                 # Wikipedia data
                 'Wiki_Name': best_match['data'].get('wiki_name', ''),
                 'Wiki_Birth_Date': best_match['data'].get('wiki_birth_date', ''),
@@ -133,61 +148,78 @@ def match_authors_with_profiles(predicted_participants, scholar_profiles, confer
                 'Wiki_Summary': best_match['data'].get('wiki_wiki_summary', ''),
                 'Wiki_Is_Researcher_ML': best_match['data'].get('wiki_is_researcher_ml', '')
             }
+            # Attach all prediction columns (prefix with Pred_ to avoid collisions)
+            try:
+                pred_dict = predicted_row.to_dict()
+                for k, v in pred_dict.items():
+                    # skip fields we already added
+                    if k in ['predicted_author', 'clean_name']:
+                        continue
+                    result_row[f'Pred_{k}'] = v
+            except Exception:
+                pass
+
             matched_results.append(result_row)
         else:
             unmatched_authors.append({
                 'Conference': conference_name,
                 'Predicted_Author': original_predicted_name,
-                'Participation_Probability': predicted_row['participation_probability'],
-                'Prediction_Rank': predicted_row['rank']
+                'Participation_Probability': _get_pred_value(predicted_row, 'participation_probability'),
+                'Prediction_Rank': _get_pred_value(predicted_row, 'rank')
             })
     
     return matched_results, unmatched_authors
 
 def main():
-    print("=== 2026 Conference Predictions with Scholar Profile Matching ===\n")
+    parser = argparse.ArgumentParser(description='Match conference prediction CSVs with scholar profiles and export Excel reports')
+    parser.add_argument('--year', '-y', type=int, default=datetime.datetime.now().year, help='Prediction year to process (default: current year)')
+    parser.add_argument('--threshold', '-t', type=int, default=80, help='Fuzzy matching threshold (0-100)')
+    args = parser.parse_args()
+
+    year = args.year
+    threshold = args.threshold
+
+    print(f"=== {year} Conference Predictions with Scholar Profile Matching ===\n")
     
     # Load scholar profiles database
+    # Resolve project root relative to this script, so script can be run from repo root or other cwd
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, '..'))
+
     print("Loading scholar profiles database...")
     try:
-        scholar_profiles = pd.read_csv('../data/processed/scholar_profiles_progressssss.csv', low_memory=False)
-        print(f"✅ Loaded {len(scholar_profiles)} scholar profiles")
+        scholar_profiles_path = os.path.join(project_root, 'data', 'processed', 'scholar_profiles.csv')
+        scholar_profiles = pd.read_csv(scholar_profiles_path, low_memory=False)
+        print(f"✅ Loaded {len(scholar_profiles)} scholar profiles (from {scholar_profiles_path})")
     except Exception as e:
         print(f"❌ Error loading scholar profiles: {e}")
         return
     
-    # Load all prediction files
+    # Load all prediction files dynamically for common conferences
+    conferences = ['aaai', 'neurips', 'iclr']
     conferences_data = {}
-    
-    # AAAI
-    try:
-        aaai_preds = pd.read_csv('../data/predictions/aaai_2026_predictions.csv')
-        aaai_participants = aaai_preds[aaai_preds['will_participate_2026'] == 1]
-        conferences_data['AAAI'] = aaai_participants
-        print(f"✅ AAAI 2026 predictions loaded: {len(aaai_participants)} predicted participants")
-    except Exception as e:
-        print(f"❌ AAAI predictions not found: {e}")
-        conferences_data['AAAI'] = pd.DataFrame()
-    
-    # NeurIPS
-    try:
-        neurips_preds = pd.read_csv('../data/predictions/neurips_2026_predictions.csv')
-        neurips_participants = neurips_preds[neurips_preds['will_participate_2026'] == 1]
-        conferences_data['NeurIPS'] = neurips_participants
-        print(f"✅ NeurIPS 2026 predictions loaded: {len(neurips_participants)} predicted participants")
-    except Exception as e:
-        print(f"❌ NeurIPS predictions not found: {e}")
-        conferences_data['NeurIPS'] = pd.DataFrame()
-    
-    # ICLR
-    try:
-        iclr_preds = pd.read_csv('../data/predictions/iclr_2026_predictions.csv')
-        iclr_participants = iclr_preds[iclr_preds['will_participate_2026'] == 1]
-        conferences_data['ICLR'] = iclr_participants
-        print(f"✅ ICLR 2026 predictions loaded: {len(iclr_participants)} predicted participants")
-    except Exception as e:
-        print(f"❌ ICLR predictions not found: {e}")
-        conferences_data['ICLR'] = pd.DataFrame()
+
+    for conf in conferences:
+        pred_path = os.path.join(project_root, 'data', 'predictions', f'{conf}_{year}_predictions.csv')
+        try:
+            preds = pd.read_csv(pred_path)
+            # Determine participant filter column flexibly
+            will_col = None
+            for c in preds.columns:
+                if 'will_participate' in c:
+                    will_col = c
+                    break
+            if will_col:
+                participants = preds[preds[will_col] == 1]
+            else:
+                # fallback: use a 'predicted_author' presence
+                participants = preds[~preds['predicted_author'].isna()] if 'predicted_author' in preds.columns else preds
+
+            conferences_data[conf.upper()] = participants
+            print(f"✅ {conf.upper()} {year} predictions loaded: {len(participants)} predicted participants (source: {pred_path})")
+        except Exception as e:
+            print(f"❌ {conf.upper()} predictions not found at {pred_path}: {e}")
+            conferences_data[conf.upper()] = pd.DataFrame()
     
     # Perform matching for each conference
     all_matched_results = []
@@ -213,11 +245,15 @@ def main():
             all_unmatched_results.extend(unmatched_results)
     
     # Create Excel file with results
-    excel_filename = '../outputs/2026_Conference_Predictions_with_Scholar_Profiles.xlsx'
+    outputs_dir = os.path.join(project_root, 'outputs')
+    os.makedirs(outputs_dir, exist_ok=True)
+    excel_filename = os.path.join(outputs_dir, f'{year}_Conference_Predictions_with_Scholar_Profiles.xlsx')
     
     with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
         
         # Create individual conference sheets
+        model_summaries = []
+
         for conf_name, results_df in conference_results.items():
             if not results_df.empty:
                 # Sort by prediction rank
@@ -235,8 +271,27 @@ def main():
                 if 'Institution' in results_df.columns:
                     top_institutions = results_df['Institution'].value_counts().head(5)
                     print(f"   • Top institutions: {', '.join(top_institutions.index[:3])}")
+
+                # Attempt to load model metadata from processed folder (e.g., iclr_participation_model.pkl)
+                    model_path = os.path.join(project_root, 'data', 'processed', f'{conf_name.lower()}_participation_model.pkl')
+                try:
+                    model = joblib.load(model_path)
+                    summary = {'Conference': conf_name, 'Model_Path': model_path}
+                    # sklearn-like estimators
+                    if hasattr(model, 'feature_importances_'):
+                        summary['Feature_Importances'] = list(model.feature_importances_)
+                        summary['Feature_Names'] = list(getattr(model, 'feature_names_in_', []))
+                    elif hasattr(model, 'coef_'):
+                        summary['Coefficients'] = list(np.ravel(model.coef_))
+                        summary['Feature_Names'] = list(getattr(model, 'feature_names_in_', []))
+                    else:
+                        summary['Info'] = str(type(model))
+                    model_summaries.append(summary)
+                except Exception:
+                    # ignore if model not available
+                    pass
         
-        # Create summary sheet
+    # Create summary sheet
         summary_data = []
         
         for conf_name, results_df in conference_results.items():
@@ -250,7 +305,7 @@ def main():
                 avg_citations = pd.to_numeric(results_df['Citations_All'], errors='coerce').mean()
                 
                 summary_data.append({
-                    'Conference': f'{conf_name} 2026',
+                    'Conference': f'{conf_name} {year}',
                     'Total_Predictions': total_predicted,
                     'Matched_Profiles': matched_count,
                     'Match_Rate': f"{match_rate:.1f}%",
@@ -264,6 +319,23 @@ def main():
             summary_df = pd.DataFrame(summary_data)
             summary_df.to_excel(writer, sheet_name='Summary', index=False)
             print(f"\n📈 Summary sheet created")
+
+        # Write raw predictions (for traceability) into separate sheets
+        for conf_key, preds_df in conferences_data.items():
+            if not preds_df.empty:
+                try:
+                    preds_df.to_excel(writer, sheet_name=f'Raw_{conf_key}_{year}', index=False)
+                except Exception:
+                    # sheet name might be too long or invalid; skip silently
+                    pass
+
+        # Write model summaries if any
+        if model_summaries:
+            ms_df = pd.DataFrame(model_summaries)
+            try:
+                ms_df.to_excel(writer, sheet_name='Model_Summaries', index=False)
+            except Exception:
+                pass
         
         # Create unmatched authors sheet for manual review
         if all_unmatched_results:

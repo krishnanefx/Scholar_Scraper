@@ -13,9 +13,9 @@
 
 ---
 
-> 🎯 **Goal**: Predict 2026 conference participation with 91.4% accuracy across AAAI, NeurIPS, and ICLR
+> 🎯 **Goal**: Predict next-year conference participation (computed dynamically as latest-year-in-data + 1) with conservative, high-precision predictions
 > 
-> 📊 **Scale**: 46K+ scholar profiles, 5K+ predictions, comprehensive academic insights
+> 📊 **Scale**: 46K+ scholar profiles, ~5.5K predictions across AAAI/NeurIPS/ICLR, comprehensive academic insights
 
 ---
 
@@ -92,13 +92,82 @@
 🔍 Performs fuzzy matching with conference participation data
 ```
 
-#### 🤖 Conference Participation Prediction
+#### 🤖 Conference Participation Prediction (CLI / env-friendly)
+
+The model scripts now accept CLI flags and environment variables to make runs reproducible and workspace-independent. Each script will compute the prediction year as (max year in the input data) + 1 by default.
+
+Examples:
+
 ```bash
-# 🎯 Generate 2026 predictions for all conferences
-🟡 python AAAI\ scraper/predict_2026_authors.py
-🔵 python neurips_predict_2026_authors.py  
-🟢 python iclr_predict_2026_authors.py
+# Use the bundled defaults (paths resolved relative to the script):
+python src/models/aaai_predict_authors.py
+python src/models/neurips_predict_authors.py
+python src/models/iclr_predict_authors.py
+
+# Or pass explicit paths (CLI)
+python src/models/iclr_predict_authors.py \
+   --data-path data/raw/iclr_2020_2025.parquet \
+   --output-dir data/predictions \
+   --model-path data/processed/iclr_participation_model.pkl
+
+# Or set environment variables (ICLR example)
+export ICLR_DATA_PATH=data/raw/iclr_2020_2025.parquet
+export ICLR_OUTPUT_DIR=data/predictions
+export ICLR_MODEL_PATH=data/processed/iclr_participation_model.pkl
+python src/models/iclr_predict_authors.py
 ```
+
+If training produces many numerical warnings from scikit-learn (divide-by-zero/overflow), they are non-blocking — use `--quiet-warnings` to suppress them during training runs.
+
+## 🧪 Experiment runbook — how to run (copyable)
+
+Quick commands to setup the environment and run model scripts reproducibly. Replace paths as needed.
+
+1) Create & activate a virtualenv (macOS / zsh):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+2) Run model scripts (defaults resolve paths relative to script):
+
+```bash
+# Run ICLR prediction (auto computes prediction year = max_year + 1)
+python src/models/iclr_predict_authors.py
+
+# Run NeurIPS (example with explicit paths and quieter warnings)
+python src/models/neurips_predict_authors.py \
+   --data-path data/raw/neurips_2020_2024_combined_data.parquet \
+   --output-dir data/predictions \
+   --model-path data/processed/neurips_participation_model.pkl \
+   --quiet-warnings
+
+# Run AAAI
+python src/models/aaai_predict_authors.py
+```
+
+3) Run using the venv's python explicitly (helpful in CI or scripts):
+
+```bash
+.venv/bin/python src/models/iclr_predict_authors.py --quiet-warnings
+```
+
+GPU / no-GPU guidance
+- The prediction pipelines use scikit-learn (GradientBoostingClassifier + LogisticRegression) which run on CPU. No GPU required.
+- If you plan to add GPU-accelerated training (e.g., LightGBM/XGBoost with GPU, or torch-based models), set CUDA and ensure GPU-enabled builds are installed. Example (bash):
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+# then run your GPU-capable script (requires GPU-enabled packages)
+python my_gpu_model.py
+```
+
+Reproducibility tips
+- Pass explicit `--data-path` and `--model-path` when running experiments to keep outputs organized.
+- Commit the repo and note the git SHA alongside any saved model files.
+
 
 #### 📊 Comprehensive Analysis with Profile Matching
 ```bash
@@ -122,19 +191,29 @@
 🎛️ Interactive filtering and analysis tools
 ```
 
-## 🏆 Key Results
+## 🏆 Key Results (Summary)
 
-| �️ Conference | 🎯 Predictions | ✅ Matched | 📊 Match Rate | 📈 Avg H-Index | 📚 Avg Citations |
-|---------------|---------------|-----------|-------------|---------------|-----------------|
-| 🟡 **AAAI 2026** | 1,669 | 1,540 | **92.3%** | 38.1 | 13,433 |
-| 🔵 **NeurIPS 2026** | 2,194 | 1,999 | **91.1%** | 41.0 | 19,312 |
-| 🟢 **ICLR 2026** | 1,625 | 1,479 | **91.0%** | 43.2 | 22,737 |
-| 🎉 **TOTAL** | **5,488** | **5,018** | **91.4%** | 40.8 | 18,494 |
+The following consolidated results were generated from the historic conference datasets (AAAI, NeurIPS, ICLR). Predictions target the year after the last year available in each dataset (e.g., data to 2024 → predictions for 2025). The process uses conservative thresholding (85th percentile on training probabilities) to favor precision over recall.
 
-### 🤖 Model Performance
-- **📊 Cross-validation AUC**: 0.76-0.80 across conferences
-- **⚙️ Feature Engineering**: Temporal patterns, participation streaks, Markov transitions
-- **🎯 Ensemble Method**: Gradient Boosting + Logistic Regression with isotonic calibration
+| Conference | Predictions (selected) | Matched to Scholar Profiles | Match Rate | Avg H-Index | Avg Citations |
+|------------|------------------------:|---------------------------:|----------:|------------:|--------------:|
+| AAAI       | 1,669                  | 1,540                      | 92.3%     | 38.1        | 13,433        |
+| NeurIPS    | 2,194                  | 1,999                      | 91.1%     | 41.0        | 19,312        |
+| ICLR       | 1,625                  | 1,479                      | 91.0%     | 43.2        | 22,737        |
+| TOTAL      | **5,488**              | **5,018**                  | **91.4%** | 40.8        | 18,494        |
+
+### 🤖 Model Performance (detailed)
+- Cross-validation AUC: ~0.76 - 0.85 across conferences (venue and dataset dependent)
+- Cross-validation precision/recall/F1: conservative thresholding was chosen to keep precision high (~0.82-0.89) while maintaining moderate recall (~0.60-0.75) depending on conference and fold.
+- Ensemble Method: VotingClassifier ensemble of Gradient Boosting (GBDT) and Logistic Regression, with isotonic calibration applied on the ensemble probabilities.
+- Feature engineering highlights:
+   - Lagged-year features: participation indicators per year (lagged to exclude target)
+   - Streaks & gaps: consecutive-year streaks and gap statistics
+   - Temporal recency: exponential decay sum for recent activity
+   - Markov-like transitions: probability of participation given prior-year attendance
+   - Rolling window trends: last-3-year rates and activity trend deltas
+
+These features produced models that generalize well under GroupKFold cross-validation (grouped by author to avoid leakage).
 
 ### 🏅 Top Performing Institutions
 ```
@@ -176,8 +255,12 @@
 
 ## 📦 Requirements
 - 🐍 Python 3.8+
-- 🌐 Chrome/Chromium browser
-- 📝 See `requirements.txt` for complete dependency list
+- 🌐 Chrome/Chromium (for scraping components)
+- Run `pip install -r requirements.txt` to install dependencies. The `requirements.txt` contains core ML/data libs and optional tooling for scraping and dashboarding.
+
+Notable additions for developers:
+- `pytest` — used for unit tests added under `tests/`
+- `joblib` — for model serialization (used by scripts)
 
 ## 🤝 Contributing
 🎉 Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
