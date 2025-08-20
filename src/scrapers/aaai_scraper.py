@@ -23,9 +23,7 @@ with open(output_file, "w", newline="", encoding="utf-8") as f:
             if response.status_code != 200:
                 print(f"Issue {issue_num}: Not found (status {response.status_code})")
                 continue
-            print(f"\n===== RAW HTML RECEIVED FROM PAGE {issue_num} =====\n")
-            print(response.text)
-            print(f"\n===== END OF RAW HTML FOR ISSUE {issue_num} =====\n")
+            # Avoid printing raw HTML (very large). Parse directly and log concise info.
             soup = BeautifulSoup(response.text, "html.parser")
             # Extract year from <div class="published"><span class="value">YYYY-MM-DD</span></div>
             year = 2025
