@@ -8,6 +8,8 @@ from sklearn.calibration import CalibratedClassifierCV
 import pandas as pd
 import numpy as np
 import os
+import argparse
+import warnings
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split, GridSearchCV, GroupKFold
@@ -122,11 +124,38 @@ def get_year_features(years, all_years):
     }
 
 def main():
+    parser = argparse.ArgumentParser(description='NeurIPS author participation predictor')
+    parser.add_argument('--data-path', help='Path to input parquet file', default=None)
+    parser.add_argument('--output-dir', help='Directory to write predictions', default=None)
+    parser.add_argument('--model-path', help='Path to save trained model', default=None)
+    parser.add_argument('--quiet-warnings', action='store_true', help='Suppress numpy runtime warnings during training')
+    args = parser.parse_args()
+
+    default_data = 'data/raw/neurips_2020_2024_combined_data.parquet'
+    default_output_dir = 'data/predictions'
+    default_model_path = 'data/processed/neurips_participation_model.pkl'
+
+    def resolve_data_path(path_like: str) -> str:
+        if os.path.isabs(path_like):
+            return os.path.normpath(path_like)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.normpath(os.path.join(script_dir, '..', '..', path_like))
+
+    data_path = args.data_path or os.environ.get('NEURIPS_DATA_PATH') or default_data
+    data_path = resolve_data_path(data_path)
+
+    output_dir = args.output_dir or os.environ.get('NEURIPS_OUTPUT_DIR') or default_output_dir
+    output_dir = resolve_data_path(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    model_path = args.model_path or os.environ.get('NEURIPS_MODEL_PATH') or default_model_path
+    model_path = resolve_data_path(model_path)
+
+    if args.quiet_warnings:
+        warnings.filterwarnings('ignore', category=RuntimeWarning)
+
     # Load NeurIPS data
     print("Loading NeurIPS data...")
-    # Resolve path relative to this script so it works regardless of CWD
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    data_path = os.path.normpath(os.path.join(script_dir, '..', '..', 'data', 'raw', 'neurips_2020_2024_combined_data.parquet'))
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"NeurIPS parquet not found at {data_path}")
     df = pd.read_parquet(data_path)
@@ -383,7 +412,7 @@ def main():
         'probability': 'participation_probability'
     })
     
-    output_file = f'../../data/predictions/neurips_{prediction_year}_predictions.csv'
+    output_file = os.path.join(output_dir, f'neurips_{prediction_year}_predictions.csv')
     results_to_save.to_csv(output_file, index=False)
     
     print(f"\n=== NeurIPS {prediction_year} Predictions Complete ===")
@@ -428,8 +457,8 @@ def main():
     print(f"  • Very high productivity (≥4 papers/year): {(predicted['participation_rate'] >= 4).sum()} ({(predicted['participation_rate'] >= 4).sum() / len(predicted) * 100:.1f}%)")
     
     # Save the model
-    joblib.dump(ensemble_final, '../../data/processed/neurips_participation_model.pkl')
-    print(f"\nModel saved as: ../../data/processed/neurips_participation_model.pkl")
+    joblib.dump(ensemble_final, model_path)
+    print(f"\nModel saved as: {model_path}")
 
 if __name__ == "__main__":
     main()

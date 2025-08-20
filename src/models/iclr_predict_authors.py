@@ -7,6 +7,9 @@ Adapted from AAAI prediction model to work with ICLR dataset
 from sklearn.calibration import CalibratedClassifierCV
 import pandas as pd
 import numpy as np
+import os
+import argparse
+import warnings
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split, GridSearchCV, GroupKFold
@@ -24,6 +27,19 @@ def clean_features(X):
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     X = np.clip(X, -1e6, 1e6)
     return X
+
+
+def resolve_data_path(path_like: str) -> str:
+    """Resolve a data path relative to this script when given a workspace-relative path.
+
+    If an absolute path is passed it is returned normalized. Intended to be small and
+    testable helper used by the unit test.
+    """
+    if os.path.isabs(path_like):
+        return os.path.normpath(path_like)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # project root is two dirs up from src/models
+    return os.path.normpath(os.path.join(script_dir, '..', '..', path_like))
 
 def normalize_author(name):
     """Clean and normalize author names."""
@@ -121,9 +137,36 @@ def get_year_features(years, all_years):
     }
 
 def main():
+    parser = argparse.ArgumentParser(description='ICLR author participation predictor')
+    parser.add_argument('--data-path', help='Path to input parquet file', default=None)
+    parser.add_argument('--output-dir', help='Directory to write predictions', default=None)
+    parser.add_argument('--model-path', help='Path to save trained model', default=None)
+    parser.add_argument('--quiet-warnings', action='store_true', help='Suppress numpy runtime warnings during training')
+    args = parser.parse_args()
+
+    # Resolve paths: priority -> CLI arg -> ENV var -> default relative path
+    default_data = 'data/raw/iclr_2020_2025.parquet'
+    default_output_dir = 'data/predictions'
+    default_model_path = 'data/processed/iclr_participation_model.pkl'
+
+    data_path = args.data_path or os.environ.get('ICLR_DATA_PATH') or default_data
+    data_path = resolve_data_path(data_path)
+
+    output_dir = args.output_dir or os.environ.get('ICLR_OUTPUT_DIR') or default_output_dir
+    output_dir = resolve_data_path(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    model_path = args.model_path or os.environ.get('ICLR_MODEL_PATH') or default_model_path
+    model_path = resolve_data_path(model_path)
+
+    if args.quiet_warnings:
+        warnings.filterwarnings('ignore', category=RuntimeWarning)
+
     # Load ICLR data
-    print("Loading ICLR data...")
-    df = pd.read_parquet('data/raw/iclr_2020_2025.parquet')
+    print(f"Loading ICLR data from {data_path}...")
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Could not find ICLR data at {data_path}")
+    df = pd.read_parquet(data_path)
     print(f"Loaded {len(df)} records from ICLR parquet dataset")
     
     # Determine prediction year dynamically
@@ -379,7 +422,7 @@ def main():
         'probability': 'participation_probability'
     })
     
-    output_file = f'data/predictions/iclr_{prediction_year}_predictions.csv'
+    output_file = os.path.join(output_dir, f'iclr_{prediction_year}_predictions.csv')
     results_to_save.to_csv(output_file, index=False)
     
     print(f"\n=== ICLR {prediction_year} Predictions Complete ===")
@@ -422,8 +465,9 @@ def main():
     print(f"  • High productivity (≥3 papers/year): {(predicted['participation_rate'] >= 3).sum()} ({(predicted['participation_rate'] >= 3).sum() / len(predicted) * 100:.1f}%)")
     
     # Save the model
-    joblib.dump(ensemble_final, 'data/processed/iclr_participation_model.pkl')
-    print(f"\nModel saved as: data/processed/iclr_participation_model.pkl")
+    # Save model
+    joblib.dump(ensemble_final, model_path)
+    print(f"\nModel saved as: {model_path}")
 
 if __name__ == "__main__":
     main()
