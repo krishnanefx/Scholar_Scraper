@@ -12,6 +12,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
+## Table of Contents
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#-quick-start-5-minutes)
+- [Inputs and outputs](#inputs-and-outputs)
+- [CLI options (as implemented)](#cli-options-as-implemented)
+- [Notes](#notes)
+
 ## Abstract
 
 **Scholar Scraper** represents a novel approach to academic participation prediction using ensemble machine learning and temporal feature engineering. This production-ready system achieves **state-of-the-art performance** (AUC: 0.84–0.86, F1: 0.74–0.82, Precision: up to 0.89, Recall: up to 0.78) in predicting future conference participation across three major AI/ML venues (AAAI, NeurIPS, ICLR) by analyzing historical participation patterns, temporal dynamics, and scholarly productivity metrics.
@@ -31,6 +39,26 @@
 **Research Impact**: This work advances the field of academic analytics by demonstrating that temporal patterns in scholarly participation can be reliably modeled using ensemble methods, with practical applications for conference organization, research trend analysis, and academic career guidance.
 
 ---
+
+## Features
+
+- Per-conference prediction scripts for AAAI, NeurIPS, and ICLR using historical author–year data
+- Temporal features including: num_participations, years_since_last, participation_rate, exp_decay_sum, markov_prob, streak/gap/trend
+- Preprocessing pipeline with StandardScaler and SelectKBest(f_classif)
+- Soft-voting ensemble (GradientBoostingClassifier + LogisticRegression)
+- 5-fold GroupKFold cross-validation on authors with at least 2 participations
+- Conservative thresholding via 85th percentile of adjusted probabilities
+- Outputs: per-conference predictions CSVs and saved model .pkl files
+- Summary generator: Excel with fuzzy-matched scholar profiles
+- Streamlit dashboard to browse and analyze scholar profiles
+
+## Installation
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
 ## 🚀 Quick Start (5 Minutes)
 
