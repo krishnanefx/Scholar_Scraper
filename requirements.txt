@@ -13,6 +13,7 @@ selenium
 networkx
 fuzzywuzzy
 python-Levenshtein
+plotly>=5.0
 # Dev / testing
 pytest
 joblib
