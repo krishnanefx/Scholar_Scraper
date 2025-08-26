@@ -55,7 +55,24 @@ st.set_page_config(
 )
 
 # === Constants ===
-PROFILES_FILE = "../data/processed/scholar_profiles.csv"
+def get_profiles_file_path():
+    """Get the correct path to the profiles file, works both locally and when deployed"""
+    # Try multiple possible paths
+    possible_paths = [
+        "../data/processed/scholar_profiles.csv",  # Local development
+        "data/processed/scholar_profiles.csv",     # Deployed from repo root
+        "./data/processed/scholar_profiles.csv",   # Current directory
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "processed", "scholar_profiles.csv"),  # Absolute from script location
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    
+    # If no file found, return the most likely path for error messages
+    return "data/processed/scholar_profiles.csv"
+
+PROFILES_FILE = get_profiles_file_path()
 
 # === Cache for DataFrame ===
 _PROFILES_DF_CACHE = None
@@ -317,6 +334,65 @@ def render_colored_tags(tag_keys, colors=None):
         )
     return " ".join(tag_html)
 
+def create_sample_profiles_file():
+    """Create a sample profiles file for demonstration purposes"""
+    try:
+        # Create the directory if it doesn't exist
+        os.makedirs(os.path.dirname(PROFILES_FILE), exist_ok=True)
+        
+        # Sample data
+        sample_data = [
+            {
+                "user_id": "sample1",
+                "name": "Dr. Jane Smith",
+                "institution": "Stanford University",
+                "country": "United States",
+                "h_index_all": "45",
+                "citations_all": "12500",
+                "research_interests": "machine learning, computer vision",
+                "wiki_matched_title": "Jane Smith (computer scientist)",
+                "NeurIPS_Institution": "Stanford University",
+                "ICLR_Institution": "",
+                "coauthors": "[]"
+            },
+            {
+                "user_id": "sample2", 
+                "name": "Prof. John Doe",
+                "institution": "MIT",
+                "country": "United States",
+                "h_index_all": "67",
+                "citations_all": "23400",
+                "research_interests": "artificial intelligence, robotics",
+                "wiki_matched_title": "",
+                "NeurIPS_Institution": "MIT",
+                "ICLR_Institution": "MIT",
+                "coauthors": "[\"sample1\"]"
+            },
+            {
+                "user_id": "sample3",
+                "name": "Dr. Li Wei",
+                "institution": "National University of Singapore",
+                "country": "Singapore", 
+                "h_index_all": "32",
+                "citations_all": "8900",
+                "research_interests": "natural language processing, deep learning",
+                "wiki_matched_title": "",
+                "NeurIPS_Institution": "",
+                "ICLR_Institution": "National University of Singapore",
+                "coauthors": "[\"sample1\", \"sample2\"]"
+            }
+        ]
+        
+        # Create DataFrame and save
+        df = pd.DataFrame(sample_data)
+        df.to_csv(PROFILES_FILE, index=False)
+        
+        st.success(f"✅ Sample data created at: {PROFILES_FILE}")
+        st.info("🔄 Please refresh the page to see the sample data.")
+        
+    except Exception as e:
+        st.error(f"❌ Error creating sample file: {e}")
+
 def get_display_columns(df):
     """Get columns for display, excluding specified columns"""
     excluded_cols = {"interest_phrases", "wiki_birth_name", "wiki_matched_title", 
@@ -379,8 +455,49 @@ def show_overview():
     """Display overview statistics and data"""
     st.header("📊 Enhanced Profile Stats")
     
+    # Debug information for deployment
+    if st.checkbox("🔧 Show debug info", value=False):
+        st.write("**Current working directory:**", os.getcwd())
+        st.write("**Script location:**", __file__)
+        st.write("**Looking for profiles at:**", PROFILES_FILE)
+        st.write("**File exists:**", os.path.exists(PROFILES_FILE))
+        
+        # Show what files do exist in common locations
+        possible_locations = [
+            ".",
+            "data",
+            "data/processed",
+            "../data/processed",
+            "./data/processed"
+        ]
+        
+        for location in possible_locations:
+            if os.path.exists(location):
+                try:
+                    files = os.listdir(location)
+                    st.write(f"**Files in {location}:**", files[:10])  # Show first 10 files
+                except:
+                    st.write(f"**Cannot list files in {location}**")
+    
     if not os.path.exists(PROFILES_FILE):
-        st.error("📂 No profiles file found yet. Start crawling to generate one.")
+        st.error("📂 No profiles file found yet.")
+        st.info("""
+        **Possible solutions:**
+        1. **If running locally:** Start crawling to generate the file
+        2. **If deployed on Streamlit Cloud:**
+           - Make sure the `data/processed/scholar_profiles.csv` file exists in your repository
+           - The file should be committed and pushed to GitHub
+           - Check that the file is not in `.gitignore`
+        3. **Expected file path:** `{}`
+        
+        **For Streamlit Cloud deployment:**
+        - Your repository should have the structure: `data/processed/scholar_profiles.csv`
+        - You can upload your generated CSV file to this path in your GitHub repository
+        """.format(PROFILES_FILE))
+        
+        # Suggest creating a sample file for demonstration
+        if st.button("📝 Create Sample Data for Demo"):
+            create_sample_profiles_file()
         return
     
     df = get_profiles_df()
