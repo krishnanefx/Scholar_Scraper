@@ -4,17 +4,6 @@ import time
 import aiohttp
 import joblib
 from functools import lru_cache
-# === CACHING SETUP ===
-WIKI_CACHE_PATH = "cache/wiki_lookup_cache.joblib"
-FUZZY_CACHE_PATH = "cache/fuzzy_match_cache.joblib"
-try:
-    wiki_cache = joblib.load(WIKI_CACHE_PATH)
-except Exception:
-    wiki_cache = {}
-try:
-    fuzzy_cache = joblib.load(FUZZY_CACHE_PATH)
-except Exception:
-    fuzzy_cache = {}
 import requests
 import mwparserfromhell
 import re
@@ -39,9 +28,32 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 
 from multiprocessing import Pool, cpu_count
+import threading
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# === PATH SETUP ===
+def get_project_root():
+    """Get the project root directory (Scholar_Scraper)"""
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # Go up from src/scrapers to Scholar_Scraper root
+    return os.path.dirname(os.path.dirname(current_dir))
+
+PROJECT_ROOT = get_project_root()
+
+# === CACHING SETUP ===
+WIKI_CACHE_PATH = os.path.join(PROJECT_ROOT, "cache", "wiki_lookup_cache.joblib")
+FUZZY_CACHE_PATH = os.path.join(PROJECT_ROOT, "cache", "fuzzy_match_cache.joblib")
+
+try:
+    wiki_cache = joblib.load(WIKI_CACHE_PATH)
+except Exception:
+    wiki_cache = {}
+try:
+    fuzzy_cache = joblib.load(FUZZY_CACHE_PATH)
+except Exception:
+    fuzzy_cache = {}
 
 # === DEVICE & MODEL SETUP ===
 def get_device():
@@ -52,12 +64,21 @@ def get_device():
     else:
         return "cpu"
 
+print("🔧 Setting up device and model...")
 device = get_device()
-classifier = pipeline(
-    "zero-shot-classification",
-    model="facebook/bart-large-mnli",
-    device=0 if device in ["cuda", "mps"] else -1
-)
+print(f"📱 Device set to use {device}")
+
+try:
+    print("🤖 Loading classification model...")
+    classifier = pipeline(
+        "zero-shot-classification",
+        model="facebook/bart-large-mnli",
+        device=0 if device in ["cuda", "mps"] else -1
+    )
+    print("✅ Classification model loaded successfully")
+except Exception as e:
+    print(f"❌ Failed to load classification model: {e}")
+    raise
 
 # === CLASSIFICATION LABELS ===
 researcher_labels = [
@@ -88,21 +109,21 @@ topic_labels = [
 
 researcher_candidate_labels = researcher_labels + non_research_labels
 
-
 # === CONFIG ===
 SAVE_EVERY = 5
 MAX_CRAWL_DEPTH = 800000000000
 SEED_USER_ID = "kukA0LcAAAAJ"  # Yoshua Bengio
-PROGRESS_CSV = "data/processed/scholar_profiles.csv"
-GRAPH_GRAPHML = "cache/coauthor_network_progressssss.graphml"
-QUEUE_FILE = "cache/queue.txt"
+PROGRESS_CSV = os.path.join(PROJECT_ROOT, "data", "processed", "scholar_profiles.csv")
+GRAPH_GRAPHML = os.path.join(PROJECT_ROOT, "cache", "coauthor_network_progressssss.graphml")
+QUEUE_FILE = os.path.join(PROJECT_ROOT, "cache", "queue.txt")
 MAX_CRAWL_SECONDS = 3600000
-FUZZY_CACHE_PATH = "cache/fuzzy_match_cache.joblib"
 
-ICLR_PARQUET_PATH = 'data/raw/iclr_2020_2025.parquet'
-NEURIPS_PARQUET_PATH = 'data/raw/neurips_2020_2024_combined_data.parquet'
+ICLR_PARQUET_PATH = os.path.join(PROJECT_ROOT, "data", "raw", "iclr_2020_2025.parquet")
+NEURIPS_PARQUET_PATH = os.path.join(PROJECT_ROOT, "data", "raw", "neurips_2020_2024_combined_data.parquet")
 FUZZY_RUN_INTERVAL = 5
 phrase_to_topics = {}
+phrase_to_topics_lock = threading.Lock()  # Thread lock for phrase_to_topics dictionary
+fuzzy_cache_lock = threading.Lock()  # Thread lock for fuzzy_cache dictionary
 
 # === BATCH TUNING ===
 BATCH_SIZE = 100  # Number of profiles to process per batch
@@ -294,7 +315,6 @@ def classify_researcher_from_summary(summary):
     try:
         classification = classifier(summary.strip(), researcher_candidate_labels)
         top_label = classification['labels'][0].lower()
-        print("Classify researcher from summary", time.time() - start)
         return top_label in [label.lower() for label in researcher_labels]
     except Exception:
         return False
@@ -306,14 +326,29 @@ def tag_interest_phrases(phrases):
     start = time.time()
     tags = set()
     for phrase in phrases:
-        if phrase not in phrase_to_topics:
-            try:
-                result = classifier(phrase, topic_labels)
-                top_labels = [label for label, score in zip(result["labels"], result["scores"]) if score > 0.3]
+        # Thread-safe check and update of phrase_to_topics
+        with phrase_to_topics_lock:
+            if phrase in phrase_to_topics:
+                # Get cached result
+                cached_labels = phrase_to_topics[phrase]
+                tags.update(cached_labels)
+                continue
+        
+        # Process phrase outside of lock to avoid blocking other threads
+        try:
+            result = classifier(phrase, topic_labels)
+            top_labels = [label for label, score in zip(result["labels"], result["scores"]) if score > 0.3]
+        except Exception:
+            top_labels = []
+        
+        # Update dictionary with lock
+        with phrase_to_topics_lock:
+            # Double-check in case another thread updated it while we were processing
+            if phrase not in phrase_to_topics:
                 phrase_to_topics[phrase] = top_labels
-            except Exception:
-                phrase_to_topics[phrase] = []
-        tags.update(phrase_to_topics[phrase])
+            cached_labels = phrase_to_topics[phrase]
+        
+        tags.update(cached_labels)
     return sorted(tags)
 
 # === WIKIPEDIA FUNCTIONS ===
@@ -478,13 +513,24 @@ def normalize_interest_phrases(raw_text):
     return processed
 
 def get_driver():
-    """Initialize headless Chrome driver"""
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    return webdriver.Chrome(options=options)
+    """Initialize headless Chrome driver with better error handling"""
+    try:
+        options = Options()
+        options.add_argument("--headless")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-web-security")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--single-process")
+        options.add_argument("--no-zygote")
+        print("🔧 Initializing Chrome driver...")
+        driver = webdriver.Chrome(options=options)
+        print("✅ Chrome driver initialized successfully")
+        return driver
+    except Exception as e:
+        print(f"❌ Failed to initialize Chrome driver: {e}")
+        raise
 
 def infer_country_from_email_field(email_field):
     """Extract country from email field"""
@@ -585,8 +631,6 @@ def extract_profile(driver, user_id, depth, parent_id=None):
     if parent_id and parent_id != user_id and parent_id not in coauthors:
         coauthors.append(parent_id)
 
-    print("extract profile", time.time() - start)
-
     return {
         "user_id": user_id, "name": name, "position": position, "email": email,
         "homepage": homepage_url, "country": country, "institution": institution,
@@ -663,19 +707,26 @@ def fuzzy_match_conference_participation(profile, conf_name, df, name_col='Autho
         profile[f"{conf_name}_Institution"] = ""
         return
 
-    # Persistent cache for fuzzy match
+    # Persistent cache for fuzzy match with thread safety
     cache_key = f"{conf_name}:{profile_name}"
-    if cache_key in fuzzy_cache:
-        match, score, matched_institution = fuzzy_cache[cache_key]
-        if float(score) >= threshold:
-            profile[f"Participated_in_{conf_name}"] = True
-            profile[f"{conf_name}_Institution"] = matched_institution
-        else:
-            profile[f"Participated_in_{conf_name}"] = False
-            profile[f"{conf_name}_Institution"] = ""
-        return
+    with fuzzy_cache_lock:
+        if cache_key in fuzzy_cache:
+            match, score, matched_institution = fuzzy_cache[cache_key]
+            if float(score) >= threshold:
+                profile[f"Participated_in_{conf_name}"] = True
+                profile[f"{conf_name}_Institution"] = matched_institution
+            else:
+                profile[f"Participated_in_{conf_name}"] = False
+                profile[f"{conf_name}_Institution"] = ""
+            return
 
-    match, score = process.extractOne(profile_name, authors_lower, scorer=fuzz.token_sort_ratio)
+    result = process.extractOne(profile_name, authors_lower, scorer=fuzz.token_sort_ratio)
+    if result is None:
+        profile[f"Participated_in_{conf_name}"] = False
+        profile[f"{conf_name}_Institution"] = ""
+        return
+    
+    match, score = result[0], result[1]
     if score >= threshold:
         # Vectorized lookup for matched institution
         mask = (authors_lower == match)
@@ -691,8 +742,11 @@ def fuzzy_match_conference_participation(profile, conf_name, df, name_col='Autho
         matched_institution = ""
         profile[f"Participated_in_{conf_name}"] = False
         profile[f"{conf_name}_Institution"] = ""
-    fuzzy_cache[cache_key] = (str(match), str(score), str(matched_institution))
-    joblib.dump(fuzzy_cache, FUZZY_CACHE_PATH)
+    
+    # Update cache with thread safety
+    with fuzzy_cache_lock:
+        fuzzy_cache[cache_key] = (str(match), str(score), str(matched_institution))
+        joblib.dump(fuzzy_cache, FUZZY_CACHE_PATH)
 
 def run_fuzzy_matching_single(profile):
     """Run fuzzy matching for a single profile"""
@@ -880,45 +934,73 @@ def crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=False):
 
 # === MAIN EXECUTION ===
 if __name__ == "__main__":
-    # Initialize globals
-    phrase_to_topics = {}
-    driver = get_driver()
-    progress_bar = tqdm(total=0, desc="Crawling profiles", dynamic_ncols=True)
+    try:
+        print("🚀 Starting Scholar Scraper...")
+        
+        # Initialize globals
+        phrase_to_topics = {}
+        print("🔧 Initializing Chrome driver...")
+        driver = get_driver()
+        progress_bar = tqdm(total=0, desc="Crawling profiles", dynamic_ncols=True)
 
-    # Load progress
-    all_profiles, visited_depths, graph, all_interest_phrases = load_progress()
-    ensure_progress_csv(PROGRESS_CSV)
+        print("📊 Loading progress...")
+        # Load progress
+        all_profiles, visited_depths, graph, all_interest_phrases = load_progress()
+        ensure_progress_csv(PROGRESS_CSV)
+        print(f"📈 Loaded {len(all_profiles)} existing profiles")
 
-    # === Initialize queue with multi-layer fallback ===
-    if os.path.exists(QUEUE_FILE):
-        queue = load_queue()
-        print(len(queue))
-    else:
-        queue = deque()
-        if all_profiles:
-            last_users = [p["user_id"] for p in all_profiles[-10:] if p.get("user_id")]
-            max_depth = max(visited_depths.get(uid, 0) for uid in last_users)
-    
-            coauthors = set()
-            for user_id in last_users:
-                try:
-                    new_coauthors = get_coauthors_from_profile(driver, user_id)
-                    for co in new_coauthors:
-                        if co not in visited_depths:
-                            coauthors.add(co)
-                except Exception:
-                    continue
-    
-            if coauthors:
-                for co in coauthors:
-                    queue.append((co, max_depth + 1, None))
+        # === Initialize queue with multi-layer fallback ===
+        print("📋 Initializing queue...")
+        if os.path.exists(QUEUE_FILE):
+            queue = load_queue()
+            print(f"📥 Loaded {len(queue)} items from queue")
+        else:
+            print("🔄 Creating new queue...")
+            queue = deque()
+            if all_profiles:
+                last_users = [p["user_id"] for p in all_profiles[-10:] if p.get("user_id")]
+                if last_users:
+                    max_depth = max(visited_depths.get(uid, 0) for uid in last_users)
+        
+                    coauthors = set()
+                    for user_id in last_users:
+                        try:
+                            new_coauthors = get_coauthors_from_profile(driver, user_id)
+                            for co in new_coauthors:
+                                if co not in visited_depths:
+                                    coauthors.add(co)
+                        except Exception as e:
+                            print(f"⚠️ Error getting coauthors for {user_id}: {e}")
+                            continue
+        
+                    if coauthors:
+                        for co in coauthors:
+                            queue.append((co, max_depth + 1, None))
+                    else:
+                        queue.append((SEED_USER_ID, 0, None))
+                else:
+                    queue.append((SEED_USER_ID, 0, None))
             else:
                 queue.append((SEED_USER_ID, 0, None))
-        else:
-            queue.append((SEED_USER_ID, 0, None))
-    try:
+        
+        print(f"🎯 Starting crawl with {len(queue)} items in queue...")
         crawl_bfs_resume(driver, queue, all_profiles, visited_depths, force=True)
         print("✅ Crawling complete!")
+        
+    except KeyboardInterrupt:
+        print("\n⏹️ Interrupted by user")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        progress_bar.close()
-        driver.quit()
+        print("🧹 Cleaning up...")
+        try:
+            progress_bar.close()
+        except:
+            pass
+        try:
+            driver.quit()
+            print("✅ Chrome driver closed")
+        except:
+            pass
