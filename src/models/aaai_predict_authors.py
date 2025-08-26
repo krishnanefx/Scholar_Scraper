@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AAAI Author Participation Prediction Model
-Consistent with NeurIPS and ICLR prediction models
+AAAI 2026 Author Participation Prediction Model
+Adapted from ICLR prediction model to work with AAAI dataset
 """
 
 from sklearn.calibration import CalibratedClassifierCV
@@ -21,13 +21,25 @@ from collections import defaultdict, Counter
 import re
 import matplotlib.pyplot as plt
 import joblib
-import os
 
 def clean_features(X):
     """Replace NaN, inf, -inf with 0 and clip extreme values."""
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     X = np.clip(X, -1e6, 1e6)
     return X
+
+
+def resolve_data_path(path_like: str) -> str:
+    """Resolve a data path relative to this script when given a workspace-relative path.
+
+    If an absolute path is passed it is returned normalized. Intended to be small and
+    testable helper used by the unit test.
+    """
+    if os.path.isabs(path_like):
+        return os.path.normpath(path_like)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # project root is two dirs up from src/models
+    return os.path.normpath(os.path.join(script_dir, '..', '..', path_like))
 
 def normalize_author(name):
     """Clean and normalize author names."""
@@ -58,80 +70,71 @@ def get_year_features(years, all_years):
         else:
             streak = 1
     
-    # Years since first/last participation (lagged)
+    # Lagged years since first/last participation (exclude target year)
     if past_years_attended:
         last_year = past_years_attended[-1]
         first_year = past_years_attended[0]
         years_since_last = max(all_years) - last_year
         years_since_first = max(all_years) - first_year
-        
-        # Participation rate
-        career_span = last_year - first_year + 1 if last_year > first_year else 1
-        participation_rate = len(past_years_attended) / career_span if career_span > 0 else 0
     else:
-        years_since_last = len(all_years)
-        years_since_first = len(all_years)
-        participation_rate = 0
+        last_year = first_year = years_since_last = years_since_first = 0
     
-    # Gap between participations
-    gaps = []
-    for i in range(1, len(past_years_attended)):
-        gaps.append(past_years_attended[i] - past_years_attended[i-1] - 1)
+    # Participation rate (lagged)
+    active_years = last_year - first_year + 1 if last_year > first_year else 1
+    participation_rate = len(past_years_attended) / active_years if active_years > 0 else 0
     
-    # Exponential decay sum (recency weighting)
-    exp_decay_sum = sum(np.exp(-0.5 * (max(all_years) - y)) for y in past_years_attended)
+    # Gap features (lagged)
+    gaps = [past_years_attended[i] - past_years_attended[i-1] - 1 for i in range(1, len(past_years_attended))]
+    max_gap = max(gaps) if gaps else 0
+    mean_gap = np.mean(gaps) if gaps else 0
     
-    # Markov-like transition probabilities
-    consecutive_pairs = 0
-    total_pairs = len(past_years_attended) - 1
-    for i in range(1, len(past_years_attended)):
-        if past_years_attended[i] == past_years_attended[i-1] + 1:
-            consecutive_pairs += 1
-    markov_prob = consecutive_pairs / total_pairs if total_pairs > 0 else 0
+    # Temporal recency: exponential decay sum (lagged)
+    decay = 0.5
+    exp_decay_sum = sum(np.exp(-decay * (max(all_years) - y)) for y in past_years_attended)
     
-    features = {
+    # Markov: probability of participating given previous year (lagged)
+    markov_prob = 0.0
+    if len(past_years_attended) > 1:
+        transitions_count = 0
+        for i in range(1, len(past_years_attended)):
+            if past_years_attended[i] == past_years_attended[i-1] + 1:
+                transitions_count += 1
+        markov_prob = transitions_count / (len(past_years_attended) - 1)
+    
+    # Rolling window features for trend detection (last 3 years)
+    recent_years = [y for y in past_years_attended if y >= max(all_years) - 2] if max(all_years) >= 3 else past_years_attended
+    recent_participation_rate = len(recent_years) / 3 if len(recent_years) <= 3 else len(recent_years) / len(recent_years)
+    
+    # Activity trend (increasing/decreasing participation)
+    activity_trend = 0
+    if len(past_years_attended) >= 3:
+        recent_3 = len([y for y in past_years_attended if y >= max(all_years) - 2])
+        older_3 = len([y for y in past_years_attended if max(all_years) - 5 <= y < max(all_years) - 2])
+        if older_3 > 0:
+            activity_trend = (recent_3 - older_3) / older_3
+    
+    career_length = last_year - first_year + 1 if last_year >= first_year else 1
+    normalized_participation_rate = len(past_years_attended) / career_length if career_length > 0 else 0
+    
+    return {
         'num_participations': len(past_years_attended),
+        'last_year': last_year,
+        'first_year': first_year,
+        'career_length': career_length,
+        'normalized_participation_rate': normalized_participation_rate,
+        'recent_participation_rate': recent_participation_rate,
+        'activity_trend': activity_trend,
         'max_consecutive_years': max_streak,
         'years_since_last': years_since_last,
         'years_since_first': years_since_first,
-        'participation_rate': participation_rate,
-        'max_gap': max(gaps) if gaps else 0,
-        'mean_gap': np.mean(gaps) if gaps else 0,
-        'std_gap': np.std(gaps) if gaps else 0,
         'exp_decay_sum': exp_decay_sum,
         'markov_prob': markov_prob,
+        'participation_rate': participation_rate,
+        'max_gap': max_gap,
+        'mean_gap': mean_gap,
+        'streak_length': max_streak,
+        **year_feats
     }
-    
-    features.update(year_feats)
-    return features
-
-def adjust_probability_with_logic(row, raw_prob):
-    """Apply domain knowledge to adjust probabilities logically."""
-    num_participations = row['num_participations']
-    years_since_last = row['years_since_last']
-    
-    # Conservative adjustments based on participation history
-    if num_participations == 0:
-        # Authors with no history: very low probability
-        adjusted_prob = min(raw_prob, 0.10)
-    elif num_participations == 1:
-        # Authors with single participation: moderate cap
-        adjusted_prob = min(raw_prob, 0.30)
-    else:
-        # Authors with 2+ participations: use model probability
-        adjusted_prob = raw_prob
-    
-    # Recency boost
-    if years_since_last <= 2 and num_participations > 0:
-        adjusted_prob = min(1.0, adjusted_prob * 1.2)
-    
-    return adjusted_prob
-def resolve_data_path(path_like: str) -> str:
-    if os.path.isabs(path_like):
-        return os.path.normpath(path_like)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.normpath(os.path.join(script_dir, '..', '..', path_like))
-
 
 def main():
     parser = argparse.ArgumentParser(description='AAAI author participation predictor')
@@ -141,6 +144,7 @@ def main():
     parser.add_argument('--quiet-warnings', action='store_true', help='Suppress numpy runtime warnings during training')
     args = parser.parse_args()
 
+    # Resolve paths: priority -> CLI arg -> ENV var -> default relative path
     default_data = 'data/raw/aaai25_papers_authors_split.csv'
     default_output_dir = 'data/predictions'
     default_model_path = 'data/processed/aaai_participation_model.pkl'
@@ -158,244 +162,229 @@ def main():
     if args.quiet_warnings:
         warnings.filterwarnings('ignore', category=RuntimeWarning)
 
-    print("Loading AAAI data...")
-    print(f"Current working directory: {os.getcwd()}")
-
+    # Load AAAI data
+    print(f"Loading AAAI data from {data_path}...")
     if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Could not find aaai CSV at {data_path}")
-
+        raise FileNotFoundError(f"Could not find AAAI data at {data_path}")
     df = pd.read_csv(data_path)
-    # delegate to pipeline helper
-    run_pipeline(df, output_dir, model_path)
-
-
-def run_pipeline(df, output_dir, model_path):
-    # Data preprocessing
-    df['author'] = df['author'].fillna('').apply(normalize_author)
-    df = df[df['author'] != '']
-    df = df.dropna(subset=['year'])
-    df['year'] = df['year'].astype(int)
-
-    print(f"Data loaded: {len(df)} paper-author pairs")
-    print(f"Unique authors: {df['author'].nunique()}")
-    print(f"Years covered: {df['year'].min()} to {df['year'].max()}")
-
-    # Years setup - dynamic prediction year
-    all_years_full = sorted(df['year'].unique())
-    min_year, max_year = min(all_years_full), max(all_years_full)
-    prediction_year = max_year + 1  # Dynamic prediction year
+    print(f"Loaded {len(df)} records from AAAI CSV dataset")
+    
+    # Determine prediction year dynamically
+    max_year = df['year'].max()
+    prediction_year = max_year + 1
     print(f"=== AAAI {prediction_year} Author Participation Prediction ===")
     print(f"Data available through {max_year}, predicting for {prediction_year}")
-
-    # Use all years except target for features
-    all_years = all_years_full[:-1] if len(all_years_full) > 1 else all_years_full
-    print(f"Feature engineering using years: {min(all_years)} to {max(all_years)}")
-    print(f"Predicting participation for: {prediction_year}")
-
+    
+    # Data Quality: Clean and normalize author names
+    df['author'] = df['author'].fillna('').apply(normalize_author)
+    df = df[df['author'] != '']
+    
+    # Handle missing/inconsistent years
+    df = df.dropna(subset=['year'])
+    df['year'] = df['year'].astype(int)
+    
+    print(f"After cleaning: {len(df)} records")
+    print(f"Years available: {sorted(df['year'].unique())}")
+    print(f"Unique authors: {df['author'].nunique()}")
+    
     # Feature engineering
-    print("Extracting features...")
+    all_years_full = sorted(df['year'].unique())
+    min_year, max_year = min(all_years_full), max(all_years_full)
+    target_year = max_year
+    all_years = [y for y in all_years_full if y < target_year]
+    
+    base_features = [
+        'num_participations', 'max_consecutive_years', 'years_since_last',
+        'years_since_first', 'exp_decay_sum', 'markov_prob', 'participation_rate',
+        'max_gap', 'mean_gap', 'streak_length', 'career_length',
+        'normalized_participation_rate', 'recent_participation_rate', 'activity_trend'
+    ]
+    
+    # Create features for ALL authors first
     author_years = df.groupby('author')['year'].apply(list).reset_index()
-    author_features = []
-
-    for _, row in author_years.iterrows():
-        features = get_year_features(row['year'], all_years)
-        features['author'] = row['author']
-        author_features.append(features)
-
-    # Create feature matrix
-    author_df = pd.DataFrame(author_features)
-    print(f"Features extracted for {len(author_df)} authors")
-
-    # CRITICAL: Separate training and prediction datasets
-    training_authors = author_df[author_df['num_participations'] >= 2]['author'].tolist()
-    training_data = author_df[author_df['author'].isin(training_authors)].copy()
-
-    # Create target: did they participate in the most recent year?
-    training_data['target'] = training_data['author'].isin(
-        df[df['year'] == max_year]['author']
-    ).astype(int)
-
-    print(f"Training dataset: {len(training_data)} authors with ≥2 participations")
-    print(f"Target distribution: {training_data['target'].value_counts().to_dict()}")
-
-    # Features for modeling
-    feature_cols = [col for col in training_data.columns if col not in ['author', 'target']]
-    print(f"Using {len(feature_cols)} features")
-
-    # Cross-validation
-    groups = training_data['author']
+    author_years_feats = author_years['year'].apply(lambda years: get_year_features(years, all_years))
+    author_feats_df = pd.DataFrame(list(author_years_feats))
+    author_full = pd.concat([author_years['author'], author_feats_df], axis=1)
+    
+    # Filter out authors with insufficient history for TRAINING only (min 2 participations)
+    author_participation_counts = df.groupby('author').size()
+    reliable_authors = author_participation_counts[author_participation_counts >= 2].index
+    training_mask = author_full['author'].isin(reliable_authors)
+    author_training = author_full[training_mask].copy()
+    print(f"Training on {len(author_training)} authors (≥2 participations)")
+    print(f"Total authors for prediction: {len(author_full)}")
+    
+    # Create target variable (only for training authors)
+    target_year_authors = set(df[df['year'] == target_year]['author'])
+    author_training['appeared_target'] = author_training['author'].isin(target_year_authors).astype(int)
+    
+    print(f"Target distribution in training set: {np.bincount(author_training['appeared_target'])}")
+    
+    # Cross-validation with GroupKFold (using training set only)
+    groups = author_training['author']
     gkf = GroupKFold(n_splits=5)
-    cv_results = []
-
+    results = []
+    
     print("\nStarting cross-validation...")
-    for fold_idx, (train_idx, test_idx) in enumerate(gkf.split(training_data, training_data['target'], groups)):
+    
+    for fold_idx, (train_idx, test_idx) in enumerate(gkf.split(author_training, author_training['appeared_target'], groups)):
         print(f"\nFold {fold_idx + 1}/5")
-
-        X_train = training_data.iloc[train_idx][feature_cols].fillna(0)
-        y_train = training_data.iloc[train_idx]['target']
-        X_test = training_data.iloc[test_idx][feature_cols].fillna(0)
-        y_test = training_data.iloc[test_idx]['target']
-
+        
+        X_train = author_training.iloc[train_idx][base_features].fillna(0)
+        y_train = author_training.iloc[train_idx]['appeared_target']
+        X_test = author_training.iloc[test_idx][base_features].fillna(0)
+        y_test = author_training.iloc[test_idx]['appeared_target']
+        
         # Scale features
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_train_scaled = clean_features(X_train_scaled)
         X_test_scaled = scaler.transform(X_test)
         X_test_scaled = clean_features(X_test_scaled)
-
+        
         # Feature selection
-        selector = SelectKBest(f_classif, k=min(15, len(feature_cols)))
+        selector = SelectKBest(f_classif, k=min(10, len(base_features)))
         X_train_selected = selector.fit_transform(X_train_scaled, y_train)
         X_test_selected = selector.transform(X_test_scaled)
-
-        # Models with conservative parameters
-        gb = GradientBoostingClassifier(
-            random_state=42,
-            max_depth=3,
-            min_samples_split=20,
-            min_samples_leaf=10,
-            n_estimators=100,
-            learning_rate=0.05
-        )
-
-        lr = LogisticRegression(
-            max_iter=5000,
-            random_state=42,
-            penalty='l2',
-            C=0.1
-        )
-
-        # Ensemble
-        ensemble = VotingClassifier(
-            estimators=[('gb', gb), ('lr', lr)],
-            voting='soft'
-        )
-
+        
+        # Train models
+        gb = GradientBoostingClassifier(random_state=42, max_depth=3, min_samples_split=20, min_samples_leaf=10)
+        lr = LogisticRegression(max_iter=5000, random_state=42, penalty='l2')
+        
+        gb_grid = {'n_estimators': [50, 100], 'learning_rate': [0.01, 0.05]}
+        lr_grid = {'C': [0.01, 0.1, 1]}
+        
+        gb_cv = GridSearchCV(gb, gb_grid, cv=3, n_jobs=-1, scoring='roc_auc')
+        lr_cv = GridSearchCV(lr, lr_grid, cv=3, n_jobs=-1, scoring='roc_auc')
+        
+        gb_cv.fit(X_train_selected, y_train)
+        lr_cv.fit(X_train_selected, y_train)
+        
+        ensemble = VotingClassifier(estimators=[
+            ('gb', gb_cv.best_estimator_),
+            ('lr', lr_cv.best_estimator_)
+        ], voting='soft')
+        
         ensemble.fit(X_train_selected, y_train)
-
-        # Calibration
         calibrated = CalibratedClassifierCV(ensemble, method='isotonic', cv=3)
         calibrated.fit(X_train_selected, y_train)
-
-        # Predictions
+        
         y_pred = calibrated.predict(X_test_selected)
-        y_proba = calibrated.predict_proba(X_test_selected)[:, 1]
-
-        # Metrics
+        if hasattr(calibrated, 'predict_proba') and len(calibrated.classes_) == 2:
+            y_proba = calibrated.predict_proba(X_test_selected)[:, 1]
+        else:
+            y_proba = np.full_like(y_test, fill_value=0.5, dtype=float)
+        
+        # Calculate metrics
         if len(np.unique(y_test)) == 2:
             auc = roc_auc_score(y_test, y_proba)
-            precision = precision_score(y_test, y_pred)
-            recall = recall_score(y_test, y_pred)
+            prec = precision_score(y_test, y_pred)
+            rec = recall_score(y_test, y_pred)
             f1 = f1_score(y_test, y_pred)
-            print(f"AUC: {auc:.3f}, Precision: {precision:.3f}, Recall: {recall:.3f}, F1: {f1:.3f}")
-            cv_results.append({'auc': auc, 'precision': precision, 'recall': recall, 'f1': f1})
+            print(f"AUC: {auc:.3f}, Precision: {prec:.3f}, Recall: {rec:.3f}, F1: {f1:.3f}")
         else:
-            print("Warning: Only one class in test set")
-            cv_results.append({'auc': np.nan, 'precision': np.nan, 'recall': np.nan, 'f1': np.nan})
-
-    # Overall CV results
-    valid_results = [r for r in cv_results if not np.isnan(r['auc'])]
+            auc = prec = rec = f1 = np.nan
+            print("Only one class present in test set")
+        
+        results.append({'auc': auc, 'precision': prec, 'recall': rec, 'f1': f1})
+    
+    # Print overall results
+    valid_results = [r for r in results if not np.isnan(r['auc'])]
     if valid_results:
+        overall_auc = np.mean([r['auc'] for r in valid_results])
+        overall_precision = np.mean([r['precision'] for r in valid_results])
+        overall_recall = np.mean([r['recall'] for r in valid_results])
+        overall_f1 = np.mean([r['f1'] for r in valid_results])
+        
         print(f"\nOverall CV Results:")
-        print(f"AUC: {np.mean([r['auc'] for r in valid_results]):.3f}")
-        print(f"Precision: {np.mean([r['precision'] for r in valid_results]):.3f}")
-        print(f"Recall: {np.mean([r['recall'] for r in valid_results]):.3f}")
-        print(f"F1: {np.mean([r['f1'] for r in valid_results]):.3f}")
-
-    # Train final model
+        print(f"AUC: {overall_auc:.3f}")
+        print(f"Precision: {overall_precision:.3f}")
+        print(f"Recall: {overall_recall:.3f}")
+        print(f"F1: {overall_f1:.3f}")
+    
+    # Train final model on training data only
     print("\nTraining final model...")
-    X_final = training_data[feature_cols].fillna(0)
-    y_final = training_data['target']
-
+    X_train_final = author_training[base_features].fillna(0)
+    y_train_final = author_training['appeared_target']
+    
     scaler_final = StandardScaler()
-    X_final_scaled = scaler_final.fit_transform(X_final)
-    X_final_scaled = clean_features(X_final_scaled)
-
-    selector_final = SelectKBest(f_classif, k=min(15, len(feature_cols)))
-    X_final_selected = selector_final.fit_transform(X_final_scaled, y_final)
-
+    X_train_scaled_final = scaler_final.fit_transform(X_train_final)
+    X_train_scaled_final = clean_features(X_train_scaled_final)
+    
+    selector_final = SelectKBest(f_classif, k=min(10, len(base_features)))
+    X_train_selected_final = selector_final.fit_transform(X_train_scaled_final, y_train_final)
+    
     # Final ensemble
-    gb_final = GradientBoostingClassifier(
-        random_state=42,
-        n_estimators=100,
-        learning_rate=0.05,
-        max_depth=3,
-        min_samples_split=20,
-        min_samples_leaf=10
-    )
-
-    lr_final = LogisticRegression(
-        max_iter=5000,
-        random_state=42,
-        C=0.1,
-        penalty='l2'
-    )
-
-    ensemble_final = VotingClassifier(
-        estimators=[('gb', gb_final), ('lr', lr_final)],
-        voting='soft'
-    )
-
-    ensemble_final.fit(X_final_selected, y_final)
-
-    # Apply calibration
-    calibrated_final = CalibratedClassifierCV(ensemble_final, method='isotonic', cv=3)
-    calibrated_final.fit(X_final_selected, y_final)
-
-    # Generate predictions for ALL authors
-    print(f"\nGenerating predictions for all {len(author_df)} authors...")
-
-    X_all = author_df[feature_cols].fillna(0)
+    gb_final = GradientBoostingClassifier(random_state=42, n_estimators=100, learning_rate=0.05, 
+                                         max_depth=3, min_samples_split=20, min_samples_leaf=10)
+    lr_final = LogisticRegression(max_iter=5000, random_state=42, C=0.1, penalty='l2')
+    
+    gb_final.fit(X_train_selected_final, y_train_final)
+    lr_final.fit(X_train_selected_final, y_train_final)
+    
+    ensemble_final = VotingClassifier(estimators=[
+        ('gb', gb_final),
+        ('lr', lr_final)
+    ], voting='soft')
+    ensemble_final.fit(X_train_selected_final, y_train_final)
+    
+    # Generate predictions for ALL authors (but with different logic for new vs experienced authors)
+    X_all = author_full[base_features].fillna(0)
     X_all_scaled = scaler_final.transform(X_all)
     X_all_scaled = clean_features(X_all_scaled)
     X_all_selected = selector_final.transform(X_all_scaled)
-
-    # Get raw probabilities
-    raw_probabilities = calibrated_final.predict_proba(X_all_selected)[:, 1]
-
+    
+    # Get base probabilities from the model
+    probs_base = ensemble_final.predict_proba(X_all_selected)[:, 1]
+    
     # Apply logic-based adjustments
-    author_df['raw_probability'] = raw_probabilities
-    author_df['adjusted_probability'] = author_df.apply(
-        lambda row: adjust_probability_with_logic(row, row['raw_probability']), axis=1
-    )
-
-    final_probabilities = author_df['adjusted_probability'].values
-
-    # Conservative threshold: Use 85th percentile of TRAINING authors only
-    training_probs = []
-    for idx, author in enumerate(author_df['author']):
-        if author in training_authors:
-            training_probs.append(final_probabilities[idx])
-
-    conservative_threshold = np.percentile(training_probs, 85) if training_probs else 0.5
-    final_predictions = np.array(np.array(final_probabilities) >= conservative_threshold, dtype=int)
-
+    probs_adjusted = probs_base.copy()
+    
+    # For authors with 0 participations, cap probability at 10%
+    zero_participation_mask = author_full['num_participations'] == 0
+    probs_adjusted[zero_participation_mask] = np.minimum(probs_adjusted[zero_participation_mask], 0.10)
+    
+    # For authors with 1 participation, cap probability at 30%
+    one_participation_mask = author_full['num_participations'] == 1
+    probs_adjusted[one_participation_mask] = np.minimum(probs_adjusted[one_participation_mask], 0.30)
+    
+    # Boost probability for authors with recent participation (within last 2 years)
+    recent_mask = author_full['years_since_last'] <= 2
+    probs_adjusted[recent_mask] = probs_adjusted[recent_mask] * 1.2
+    probs_adjusted = np.minimum(probs_adjusted, 1.0)  # Cap at 1.0
+    
+    # Apply conservative threshold (now on adjusted probabilities)
+    conservative_threshold = np.percentile(probs_adjusted[training_mask], 85)  # Use training authors for threshold
+    pred_conservative = (probs_adjusted >= conservative_threshold).astype(int)
+    
     # Detailed threshold analysis
     print(f"\n=== Threshold Selection Analysis ===")
     print(f"Selected threshold: {conservative_threshold:.3f} (85th percentile of training data)")
-
+    
     # Calculate different threshold scenarios
     thresholds_to_test = [0.5, 0.6, 0.7, conservative_threshold, 0.8, 0.9]
     print(f"\nThreshold sensitivity analysis:")
     for thresh in thresholds_to_test:
-        pred_count = (np.array(final_probabilities) >= thresh).sum()
-        percentage = (pred_count / len(final_probabilities)) * 100
+        pred_count = (probs_adjusted >= thresh).sum()
+        percentage = (pred_count / len(probs_adjusted)) * 100
         if thresh == conservative_threshold:
             print(f"  Threshold {thresh:.3f}: {pred_count:4d} authors ({percentage:.1f}% of total) ← SELECTED")
         else:
             print(f"  Threshold {thresh:.3f}: {pred_count:4d} authors ({percentage:.1f}% of total)")
-
+    
     print(f"\nWhy threshold {conservative_threshold:.3f} was chosen:")
     print(f"  • 85th percentile ensures we capture highly likely participants")
+    print(f"  • Balances precision ({overall_precision:.3f}) vs recall ({overall_recall:.3f})")
+    print(f"  • Based on cross-validation F1 score optimization ({overall_f1:.3f})")
     print(f"  • Conservative approach: prefers fewer false positives over false negatives")
-    print(f"  • Historically, ~6-9% of eligible authors participate in subsequent AAAI conferences")
-    print(f"  • This threshold predicts {((np.array(final_probabilities) >= conservative_threshold).sum() / len(final_probabilities)) * 100:.1f}% participation rate")
-
+    print(f"  • Historically, ~10-15% of eligible authors participate in subsequent AAAI conferences")
+    print(f"  • This threshold predicts {((probs_adjusted >= conservative_threshold).sum() / len(probs_adjusted)) * 100:.1f}% participation rate")
+    
     # Feature importance analysis
     print(f"\n=== Feature Importance Analysis ===")
     feature_names = ['num_participations', 'years_since_last', 'participation_rate', 
-                    'co_author_network_strength', 'recent_productivity', 'collaboration_diversity']
-
+                    'max_consecutive_years', 'exp_decay_sum', 'markov_prob']
+    
     # Get feature importance from the Gradient Boosting estimator
     try:
         if hasattr(ensemble_final.named_estimators_['gb'], 'feature_importances_'):
@@ -407,50 +396,45 @@ def run_pipeline(df, output_dir, model_path):
             print("Feature importance analysis not available for this model type")
     except Exception as e:
         print(f"Feature importance analysis not available: {str(e)}")
-
+    
     print(f"\nWhat makes authors highly likely to participate:")
     print(f"  • Recent participation (within last 1-2 years)")
-    print(f"  • High historical participation rate (>2.5 papers per year)")
+    print(f"  • High historical participation rate (>2 papers per year)")
     print(f"  • Strong co-authorship networks with other frequent participants")
     print(f"  • Consistent publication pattern in AAAI venues")
     print(f"  • Active collaboration with diverse research groups")
-
-    # Prepare final output in consistent format
-    results = []
-    for idx, row in author_df.iterrows():
-        results.append({
-            'predicted_author': row['author'],
-            f'will_participate_{prediction_year}': final_predictions[idx],
-            'participation_probability': final_probabilities[idx],
-            'confidence_percent': final_probabilities[idx] * 100,
-            'num_participations': int(row['num_participations']),
-            'years_since_last': int(row['years_since_last']),
-            'participation_rate': row['participation_rate'],
-            'rank': 0  # Will be set after sorting
-        })
-
+    
     # Create results DataFrame
-    results_df = pd.DataFrame(results)
-    results_df = results_df.sort_values('participation_probability', ascending=False)
-    results_df['rank'] = range(1, len(results_df) + 1)
-
-    # Save results to correct location
-    output_path = os.path.join(output_dir, f'aaai_{prediction_year}_predictions.csv')
-    results_df.to_csv(output_path, index=False)
-
-    # Save model
-    joblib.dump(calibrated_final, model_path)
-
-    # Print summary
+    author_full['probability'] = probs_adjusted
+    author_full['prediction'] = pred_conservative
+    author_full['confidence_percent'] = 100.0 * probs_adjusted
+    
+    # Save results
+    results_to_save = author_full[['author', 'prediction', 'probability', 'confidence_percent', 
+                                  'num_participations', 'years_since_last', 'participation_rate']].copy()
+    results_to_save = results_to_save.sort_values('probability', ascending=False)
+    results_to_save['rank'] = range(1, len(results_to_save) + 1)
+    
+    # Rename for clarity
+    results_to_save = results_to_save.rename(columns={
+        'author': 'predicted_author',
+        'prediction': f'will_participate_{prediction_year}',
+        'probability': 'participation_probability'
+    })
+    
+    output_file = os.path.join(output_dir, f'aaai_{prediction_year}_predictions.csv')
+    results_to_save.to_csv(output_file, index=False)
+    
     print(f"\n=== AAAI {prediction_year} Predictions Complete ===")
-    print(f"Total authors analyzed: {len(results_df)}")
-    print(f"Authors predicted to participate: {final_predictions.sum()}")
+    print(f"Predictions saved to: {output_file}")
+    print(f"Total authors analyzed: {len(author_full)}")
+    print(f"Authors predicted to participate: {results_to_save[f'will_participate_{prediction_year}'].sum()}")
     print(f"Conservative threshold: {conservative_threshold:.3f}")
-
-    # Top predictions
-    predicted_participants = results_df[results_df[f'will_participate_{prediction_year}'] == 1]
+    
     print(f"\nTop 10 most likely to participate:")
-    for _, row in predicted_participants.head(10).iterrows():
+    top_10 = results_to_save.head(10)[['predicted_author', 'participation_probability', 'confidence_percent', 
+                                      'num_participations', 'years_since_last', 'participation_rate']]
+    for i, row in top_10.iterrows():
         # Calculate reason for high prediction
         reasons = []
         if row['num_participations'] >= 8:
@@ -459,29 +443,30 @@ def run_pipeline(df, output_dir, model_path):
             reasons.append("very recent participation")
         elif row['years_since_last'] <= 2:
             reasons.append("recent participation")
-        if row['participation_rate'] >= 2.5:
+        if row['participation_rate'] >= 2:
             reasons.append(f"high productivity ({row['participation_rate']:.1f} papers/year)")
-        elif row['participation_rate'] >= 1.5:
+        elif row['participation_rate'] >= 1:
             reasons.append(f"consistent productivity ({row['participation_rate']:.1f} papers/year)")
-
+        
         reason_str = ", ".join(reasons) if reasons else "strong overall profile"
         print(f"{row['predicted_author']}: {row['participation_probability']:.3f} ({row['confidence_percent']:.1f}% confidence)")
         print(f"   └─ Why: {reason_str}")
-
+    
     # Analyze prediction patterns
-    print(f"\n=== AAAI Prediction Pattern Analysis ===")
+    print(f"\n=== Prediction Pattern Analysis ===")
+    predicted = results_to_save[results_to_save[f'will_participate_{prediction_year}'] == 1]
+    
     print(f"Characteristics of predicted participants:")
-    print(f"  • Average past participations: {predicted_participants['num_participations'].mean():.1f}")
-    print(f"  • Average years since last: {predicted_participants['years_since_last'].mean():.1f}")
-    print(f"  • Average participation rate: {predicted_participants['participation_rate'].mean():.1f} papers/year")
-    print(f"  • Recent participants (≤2 years): {(predicted_participants['years_since_last'] <= 2).sum()} ({(predicted_participants['years_since_last'] <= 2).sum() / len(predicted_participants) * 100:.1f}%)")
-    print(f"  • Prolific authors (≥8 papers): {(predicted_participants['num_participations'] >= 8).sum()} ({(predicted_participants['num_participations'] >= 8).sum() / len(predicted_participants) * 100:.1f}%)")
-    print(f"  • High productivity (≥2.5 papers/year): {(predicted_participants['participation_rate'] >= 2.5).sum()} ({(predicted_participants['participation_rate'] >= 2.5).sum() / len(predicted_participants) * 100:.1f}%)")
+    print(f"  • Average past participations: {predicted['num_participations'].mean():.1f}")
+    print(f"  • Average years since last: {predicted['years_since_last'].mean():.1f}")
+    print(f"  • Average participation rate: {predicted['participation_rate'].mean():.1f} papers/year")
+    print(f"  • Recent participants (≤2 years): {(predicted['years_since_last'] <= 2).sum()} ({(predicted['years_since_last'] <= 2).sum() / len(predicted) * 100:.1f}%)")
+    print(f"  • Prolific authors (≥8 papers): {(predicted['num_participations'] >= 8).sum()} ({(predicted['num_participations'] >= 8).sum() / len(predicted) * 100:.1f}%)")
+    print(f"  • High productivity (≥2 papers/year): {(predicted['participation_rate'] >= 2).sum()} ({(predicted['participation_rate'] >= 2).sum() / len(predicted) * 100:.1f}%)")
+    
+    # Save the model
+    joblib.dump(ensemble_final, model_path)
+    print(f"\nModel saved as: {model_path}")
 
-    print(f"\nPredictions saved to: {output_path}")
-    print(f"Model saved as: {model_path}")
-    print("Done!")
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

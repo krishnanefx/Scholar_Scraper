@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import csv
+import os
 
 
 # Scrape issues from 1 to 1000
@@ -10,7 +11,17 @@ headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 }
 
-output_file = "../../data/raw/aaai25_papers_authors_split.csv"
+# Create absolute path to ensure the file can be created
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(script_dir))
+data_raw_dir = os.path.join(project_root, "data", "raw")
+
+# Create directory if it doesn't exist
+os.makedirs(data_raw_dir, exist_ok=True)
+
+output_file = os.path.join(data_raw_dir, "aaai25_papers_authors_split.csv")
+print(f"Output file will be saved to: {output_file}")
+
 with open(output_file, "w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=["title", "article_link", "author", "pdf_link", "year", "issue_number"])
     writer.writeheader()
