@@ -142,14 +142,8 @@ If we use **GroupKFold** (e.g. grouping by author), entire groups are kept toget
 
 ---
 
-# 📐 Statistical Stability  
-
 # Scholar Scraper
-
 Lightweight tools to generate per-conference participation predictions from historical data and to match predicted authors to a local scholar profiles CSV. Includes a Streamlit dashboard for browsing profiles.
-
-This README only documents facts that are implemented in the repository. No performance claims are made here.
-
 ## What's included
 
 - Prediction scripts
