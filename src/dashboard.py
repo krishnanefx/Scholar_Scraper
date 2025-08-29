@@ -1421,7 +1421,7 @@ def generate_author_network(df, selected_author, degrees):
             st.error(f"Error generating Gephi file: {str(e)}")
 
         # Check node limit for visualization
-        NODE_LIMIT = 100
+        NODE_LIMIT = 200
 
         if node_count > NODE_LIMIT:
             st.warning(f"⚠️ Network too large for optimal dashboard visualization ({node_count} nodes, limit: {NODE_LIMIT})")
