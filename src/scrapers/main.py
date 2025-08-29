@@ -127,7 +127,7 @@ fuzzy_cache_lock = threading.Lock()  # Thread lock for fuzzy_cache dictionary
 
 # === BATCH TUNING ===
 BATCH_SIZE = 100  # Number of profiles to process per batch
-SAVE_INTERVAL = 100  # Number of processed profiles before saving progress
+SAVE_INTERVAL = 100 # Number of processed profiles before saving progress
 
 # Load conference data once for fuzzy matching (module scope)
 iclr_df = pd.read_parquet(ICLR_PARQUET_PATH) if os.path.exists(ICLR_PARQUET_PATH) else None

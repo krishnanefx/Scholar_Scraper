@@ -509,7 +509,7 @@ def show_overview():
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("👤 Total Profiles", len(df))
+        st.metric("👤 Total Profiles", f"{len(df):,}")
     
     with col2:
         if "h_index_all" in df.columns:
@@ -522,7 +522,7 @@ def show_overview():
     with col3:
         if "wiki_matched_title" in df.columns:
             wiki_count = df["wiki_matched_title"].notna().sum()
-            st.metric("🌐 Wikipedia Matches", wiki_count)
+            st.metric("🌐 Wikipedia Matches", f"{wiki_count:,}")
 
     
     # === Conference Participation ===
@@ -568,7 +568,12 @@ def show_overview():
     with col3:
         if "NeurIPS_Institution" in df.columns and "ICLR_Institution" in df.columns:
             both_count = len(df[df["NeurIPS_Institution"].notna() & df["ICLR_Institution"].notna()])
-            st.metric("🔗 Both Conferences", both_count)
+            total_both = 13182
+            st.metric(
+                "🔗 Both Conferences", 
+                f"{both_count:,} / {total_both:,}",
+                help=f"{both_count / total_both * 100:.1f}% of dual participants found"
+            )
             
             # Add wiki match count for both conferences
             if "wiki_matched_title" in df.columns:
@@ -1001,7 +1006,7 @@ def show_analytics():
             singaporean_researchers = df[df["country"].str.lower() == "singapore"]
             singaporean_user_ids = set(singaporean_researchers["user_id"].dropna().astype(str))
             
-            st.info(f"Found {len(singaporean_user_ids)} Singaporean researchers in database")
+            st.info(f"Found {len(singaporean_user_ids):,} Singaporean researchers in database")
             
             # Calculate Singaporean co-author counts for each researcher
             df_copy = df.copy()
@@ -1014,7 +1019,7 @@ def show_analytics():
             
             with col1:
                 total_with_sg_coauthors = (df_copy["singaporean_coauthors_count"] > 0).sum()
-                st.metric("Researchers with SG Co-authors", total_with_sg_coauthors)
+                st.metric("Researchers with SG Co-authors", f"{total_with_sg_coauthors:,}")
             
             with col2:
                 avg_sg_coauthors = df_copy["singaporean_coauthors_count"].mean()
@@ -1026,39 +1031,49 @@ def show_analytics():
             
             with col4:
                 total_sg_connections = df_copy["singaporean_coauthors_count"].sum()
-                st.metric("Total SG Connections", total_sg_connections)
+                st.metric("Total SG Connections", f"{total_sg_connections:,}")
             
             # Show top researchers with most Singaporean co-authors
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.subheader("🔝 Top Researchers by Singaporean Co-authors")
             with col2:
+                # Add number input for controlling how many results to show
+                show_sg_count = st.number_input(
+                    "Show top N researchers",
+                    min_value=5,
+                    max_value=100,
+                    value=20,
+                    step=5,
+                    help="Choose how many top researchers to display"
+                )
                 exclude_singaporeans = st.checkbox(
-                    "📍 Non-Singaporeans only", 
+                    "📍 Non-Singaporeans only",
                     value=False,
                     help="Show only researchers from outside Singapore who collaborate with Singaporean researchers"
                 )
-            
+
             # Filter data based on checkbox
             if exclude_singaporeans:
                 # Filter out researchers who are from Singapore
                 top_sg_researchers = df_copy[
-                    (df_copy["singaporean_coauthors_count"] > 0) & 
+                    (df_copy["singaporean_coauthors_count"] > 0) &
                     (df_copy["country"].str.lower() != "singapore")
-                ].nlargest(20, "singaporean_coauthors_count")
-                
+                ].nlargest(show_sg_count, "singaporean_coauthors_count")
+
                 if not top_sg_researchers.empty:
                     st.info(f"Showing top {len(top_sg_researchers)} non-Singaporean researchers with Singaporean collaborations")
                 else:
                     st.warning("No non-Singaporean researchers found with Singaporean co-authors")
             else:
                 # Show all researchers (including Singaporeans)
-                top_sg_researchers = df_copy[df_copy["singaporean_coauthors_count"] > 0].nlargest(20, "singaporean_coauthors_count")
-                
+                top_sg_researchers = df_copy[df_copy["singaporean_coauthors_count"] > 0].nlargest(show_sg_count, "singaporean_coauthors_count")
+
                 if not top_sg_researchers.empty:
                     st.info(f"Showing top {len(top_sg_researchers)} researchers (all countries) with Singaporean collaborations")
             
             if not top_sg_researchers.empty:
+                
                 display_cols = ["name", "institution", "country", "singaporean_coauthors_count"]
                 if "h_index_all" in df_copy.columns:
                     display_cols.append("h_index_all")
@@ -1158,10 +1173,10 @@ def show_network():
         # Network type selection
         network_type = st.selectbox(
             "Network Type",
-            ["Author Collaboration", "Institution Network", "Country Network"],
+            ["Author Collaboration"],
             help="Choose the type of network to visualize"
         )
-        
+
         if network_type == "Author Collaboration":
             # Author search for network center
             search_query = st.text_input(
@@ -1234,14 +1249,6 @@ def show_network():
                         generate_author_network(df, selected_author, degree_choice)
                 else:
                     st.warning("No authors found matching your search.")
-        
-        elif network_type == "Institution Network":
-            if st.button("🚀 Generate Institution Network"):
-                generate_institution_network(df)
-        
-        elif network_type == "Country Network":
-            if st.button("🚀 Generate Country Network"):
-                generate_country_network(df)
     
     with col2:
         st.subheader("📊 Network Statistics")
@@ -1251,7 +1258,7 @@ def show_network():
             total_researchers = len(df)
             researchers_with_coauthors = df["coauthors"].notna().sum()
             
-            st.metric("Total Researchers", total_researchers)
+            st.metric("Total Researchers", f"{total_researchers:,}")
             
             # Additional stats
             if researchers_with_coauthors > 0:
@@ -1277,116 +1284,166 @@ def generate_author_network(df, selected_author, degrees):
     try:
         import networkx as nx
         import matplotlib.pyplot as plt
-        from matplotlib.patches import FancyBboxPatch
-        
-        st.subheader(f"�️ Collaboration Network for {selected_author}")
-        
-        # Find the selected author's data
-        author_data = df[df["name"] == selected_author].iloc[0]
-        
+        import io
+        import base64
+        import time
+
+        st.subheader(f"🤝 Collaboration Network for {selected_author}")
+
+        # Start timing for performance monitoring
+        start_time = time.time()
+
+        # Check if author exists
+        if selected_author not in df["name"].values:
+            st.error(f"Author '{selected_author}' not found in the dataset.")
+            return
+
+        # Create efficient lookup dictionaries for better performance
+        st.info("🔄 Building author lookup tables...")
+        name_to_data = {}
+        name_to_coauthors = {}
+        user_id_to_name = {}
+
+        for idx, row in df.iterrows():
+            name = row.get("name", "")
+            user_id = row.get("user_id", "")
+            if name:
+                name_to_data[name] = row
+                if user_id:
+                    user_id_to_name[user_id] = name
+
+        # Second pass to build coauthor relationships
+        for idx, row in df.iterrows():
+            name = row.get("name", "")
+            coauthors = row.get("coauthors", "")
+            if name and pd.notna(coauthors) and coauthors:
+                try:
+                    if isinstance(coauthors, str) and coauthors.startswith('['):
+                        coauthor_list = ast.literal_eval(coauthors)
+                        # Convert user IDs to names
+                        coauthor_names = []
+                        for coauthor_id in coauthor_list:
+                            if isinstance(coauthor_id, str) and coauthor_id in user_id_to_name:
+                                coauthor_names.append(user_id_to_name[coauthor_id])
+                            elif isinstance(coauthor_id, dict) and coauthor_id.get("user_id") in user_id_to_name:
+                                coauthor_names.append(user_id_to_name[coauthor_id.get("user_id")])
+                        name_to_coauthors[name] = coauthor_names[:20]  # Limit to prevent explosion
+                    elif isinstance(coauthors, list):
+                        coauthor_names = []
+                        for coauthor_id in coauthors:
+                            if isinstance(coauthor_id, str) and coauthor_id in user_id_to_name:
+                                coauthor_names.append(user_id_to_name[coauthor_id])
+                        name_to_coauthors[name] = coauthor_names[:20]
+                except Exception as e:
+                    # Skip problematic coauthor data
+                    continue
+
+        st.info(f"✅ Processed {len(name_to_data)} authors and {len(user_id_to_name)} user mappings for network analysis")
+
         # Create network graph
         G = nx.Graph()
-        
-        # Add central author - use name as ID for better display
+
+        # Add central author
         G.add_node(selected_author, name=selected_author, type="central", level=0)
-        
-        # Build network recursively with proper degree tracking
+
+        # Build network with proper limits to prevent infinite loops
         added_nodes = {selected_author}
         current_level_nodes = [(selected_author, 0)]
-        
+        max_nodes = 200  # Hard limit to prevent memory issues
+        max_edges_per_node = 10  # Limit connections per node
+
         for level in range(degrees):
+            if len(G.nodes()) >= max_nodes:
+                st.warning(f"⚠️ Network size limit reached ({max_nodes} nodes). Stopping expansion.")
+                break
+
             next_level_nodes = []
-            
+            level_start_time = time.time()
+
+            st.info(f"🔄 Processing level {level + 1} connections...")
+
             for node_name, current_level in current_level_nodes:
-                # Find coauthors for current node
-                node_data = df[df["name"] == node_name]
-                if not node_data.empty:
-                    coauthors = node_data.iloc[0].get("coauthors")
-                    if pd.notna(coauthors) and coauthors:
-                        try:
-                            if isinstance(coauthors, str) and coauthors.startswith('['):
-                                coauthor_list = ast.literal_eval(coauthors)
-                                
-                                for coauthor in coauthor_list[:15]:  # Limit to prevent overcrowding
-                                    if isinstance(coauthor, dict):
-                                        coauthor_name = coauthor.get("name", "Unknown")
-                                    else:
-                                        coauthor_name = str(coauthor)
-                                    
-                                    if coauthor_name not in added_nodes and coauthor_name.strip():
-                                        # Use name as node ID for better display
-                                        G.add_node(coauthor_name, name=coauthor_name, type="collaborator", level=current_level+1)
+                if node_name in name_to_coauthors:
+                    coauthor_names = name_to_coauthors[node_name]
+
+                    # Limit coauthors per node to prevent network explosion
+                    coauthor_names = coauthor_names[:max_edges_per_node]
+
+                    for coauthor_name in coauthor_names:
+                        if coauthor_name and coauthor_name != node_name:
+                            # Check if this coauthor exists in our dataset
+                            if coauthor_name in name_to_data:
+                                if coauthor_name not in added_nodes:
+                                    if len(G.nodes()) < max_nodes:
+                                        G.add_node(coauthor_name, name=coauthor_name,
+                                                 type="collaborator", level=current_level+1)
                                         added_nodes.add(coauthor_name)
                                         next_level_nodes.append((coauthor_name, current_level+1))
-                                    
-                                    # Add edge (only if both nodes exist)
-                                    if coauthor_name in added_nodes:
-                                        G.add_edge(node_name, coauthor_name)
-                        except:
-                            pass
-            
+
+                                # Add edge (only if both nodes exist)
+                                if coauthor_name in added_nodes:
+                                    G.add_edge(node_name, coauthor_name)
+
             current_level_nodes = next_level_nodes
-            if not next_level_nodes:  # No more nodes to expand
+
+            level_time = time.time() - level_start_time
+            st.info(f"✅ Level {level + 1} completed in {level_time:.2f}s. Added {len(next_level_nodes)} new nodes.")
+
+            if not next_level_nodes:
+                st.info("🔄 No more connections to expand.")
                 break
-        
-        if len(G.nodes()) > 1:
-            # Create visualization
-            fig, ax = plt.subplots(figsize=(12, 8))
-            
-            # Position nodes
-            pos = nx.spring_layout(G, k=3, iterations=50)
-            
-            # Draw nodes with different colors by level
-            node_colors = []
-            node_sizes = []
-            for node in G.nodes():
-                level = G.nodes[node].get('level', 0)
-                if level == 0:
-                    node_colors.append('#FF6B6B')  # Red for central
-                    node_sizes.append(800)
-                elif level == 1:
-                    node_colors.append('#4ECDC4')  # Teal for direct collaborators
-                    node_sizes.append(400)
-                else:
-                    node_colors.append('#45B7D1')  # Blue for extended network
-                    node_sizes.append(200)
-            
-            # Draw network
-            nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=node_sizes, alpha=0.8)
-            nx.draw_networkx_edges(G, pos, alpha=0.5, width=1)
-            
-            # Add labels for important nodes
-            labels = {}
-            for node in G.nodes():
-                name = G.nodes[node].get('name', str(node))
-                if len(name) > 20:
-                    name = name[:17] + "..."
-                labels[node] = name
-            
-            nx.draw_networkx_labels(G, pos, labels, font_size=8)
-            
-            plt.title(f"Collaboration Network for {selected_author}\n({len(G.nodes())} researchers, {len(G.edges())} connections)")
-            
-            # Add legend for node levels
-            from matplotlib.patches import Patch
-            legend_elements = [
-                Patch(facecolor='#FF6B6B', label='Central Author'),
-                Patch(facecolor='#4ECDC4', label='1st Degree (Direct Collaborators)'),
-                Patch(facecolor='#45B7D1', label='2nd+ Degree (Extended Network)')
-            ]
-            plt.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1, 1))
-            
-            plt.axis('off')
-            plt.tight_layout()
-            
-            st.pyplot(fig)
-            
+
+        total_time = time.time() - start_time
+        node_count = len(G.nodes())
+        edge_count = len(G.edges())
+
+        st.success(f"🎉 Network built in {total_time:.2f}s! Found {node_count} researchers with {edge_count} connections.")
+
+        if node_count <= 1:
+            st.warning("No collaboration data found for this author.")
+            return
+
+        # Always provide Gephi download option regardless of network size
+        try:
+            gexf_content = generate_gephi_file(G, selected_author)
+
+            # Create download button - always available
+            st.download_button(
+                label="📥 Download Gephi Network File (.gexf)",
+                data=gexf_content,
+                file_name=f"author_network_{selected_author.replace(' ', '_')}.gexf",
+                mime="application/xml",
+                help="Download this file and open it in Gephi for advanced network analysis and visualization",
+                key="gephi_download"
+            )
+
+        except Exception as e:
+            st.error(f"Error generating Gephi file: {str(e)}")
+
+        # Check node limit for visualization
+        NODE_LIMIT = 100
+
+        if node_count > NODE_LIMIT:
+            st.warning(f"⚠️ Network too large for optimal dashboard visualization ({node_count} nodes, limit: {NODE_LIMIT})")
+            st.info("💡 The Gephi download above provides full network analysis capabilities")
+
+            # Still show basic statistics even for large networks
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Nodes", node_count)
+            with col2:
+                st.metric("Total Connections", edge_count)
+            with col3:
+                if node_count > 1:
+                    density = nx.density(G)
+                    st.metric("Network Density", f"{density:.3f}")
+
             # Show degree breakdown
             level_counts = {}
             for node in G.nodes():
                 level = G.nodes[node].get('level', 0)
                 level_counts[level] = level_counts.get(level, 0) + 1
-            
+
             st.write("**Network Breakdown by Degree:**")
             for level in sorted(level_counts.keys()):
                 if level == 0:
@@ -1394,25 +1451,203 @@ def generate_author_network(df, selected_author, degrees):
                 else:
                     degree_text = "1st" if level == 1 else "2nd" if level == 2 else f"{level}th"
                     st.write(f"- {degree_text} Degree: {level_counts[level]} researchers")
-            
-            # Network statistics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Nodes", len(G.nodes()))
-            with col2:
-                st.metric("Total Connections", len(G.edges()))
-            with col3:
-                if len(G.nodes()) > 1:
-                    density = nx.density(G)
-                    st.metric("Network Density", f"{density:.3f}")
+
         else:
-            st.warning("No collaboration data found for this author.")
-            
+            # Display network visualization in dashboard
+            st.info(f"📊 Displaying network with {node_count} nodes (within limit of {NODE_LIMIT})")
+
+            try:
+                # Create visualization with better layout and styling
+                fig, ax = plt.subplots(figsize=(14, 10))
+                fig.patch.set_facecolor('#f8f9fa')  # Light background
+
+                # Use better layout algorithms for cleaner visualization
+                if node_count <= 20:
+                    # For small networks, use spring layout with better spacing
+                    pos = nx.spring_layout(G, k=2.5, iterations=100, seed=42)
+                elif node_count <= 50:
+                    # For medium networks, use Kamada-Kawai layout (cleaner)
+                    pos = nx.kamada_kawai_layout(G)
+                else:
+                    # For larger networks, use Fruchterman-Reingold (good balance)
+                    pos = nx.fruchterman_reingold_layout(G, k=1.5, iterations=100, seed=42)
+
+                # Enhanced node styling with better colors and sizes
+                node_colors = []
+                node_sizes = []
+                node_alphas = []
+
+                for node in G.nodes():
+                    level = G.nodes[node].get('level', 0)
+                    if level == 0:
+                        node_colors.append('#DC143C')  # Crimson red for central author
+                        node_sizes.append(1200)
+                        node_alphas.append(0.95)
+                    elif level == 1:
+                        node_colors.append('#4169E1')  # Royal blue for direct collaborators
+                        node_sizes.append(800)
+                        node_alphas.append(0.85)
+                    elif level == 2:
+                        node_colors.append('#32CD32')  # Lime green for 2nd degree
+                        node_sizes.append(500)
+                        node_alphas.append(0.75)
+                    else:
+                        node_colors.append('#FFA500')  # Orange for extended network
+                        node_sizes.append(300)
+                        node_alphas.append(0.65)
+
+                # Draw edges with varying thickness based on connection strength
+                edge_colors = []
+                edge_widths = []
+                for u, v in G.edges():
+                    level_u = G.nodes[u].get('level', 0)
+                    level_v = G.nodes[v].get('level', 0)
+                    if level_u == 0 or level_v == 0:
+                        edge_colors.append('#FF6B6B')  # Red for central connections
+                        edge_widths.append(2.5)
+                    elif max(level_u, level_v) == 1:
+                        edge_colors.append('#87CEEB')  # Sky blue for 1st degree connections
+                        edge_widths.append(2.0)
+                    else:
+                        edge_colors.append('#D3D3D3')  # Light gray for extended connections
+                        edge_widths.append(1.5)
+
+                # Draw the network
+                # Draw edges with different styles for different connection types
+                central_edges = [(u, v) for u, v in G.edges() if G.nodes[u].get('level', 0) == 0 or G.nodes[v].get('level', 0) == 0]
+                first_degree_edges = [(u, v) for u, v in G.edges() if max(G.nodes[u].get('level', 0), G.nodes[v].get('level', 0)) == 1 and (u, v) not in central_edges]
+                extended_edges = [(u, v) for u, v in G.edges() if (u, v) not in central_edges and (u, v) not in first_degree_edges]
+
+                if central_edges:
+                    nx.draw_networkx_edges(G, pos, edgelist=central_edges, edge_color='#FF6B6B',
+                                         width=2.5, alpha=0.7, ax=ax, arrows=False)
+                if first_degree_edges:
+                    nx.draw_networkx_edges(G, pos, edgelist=first_degree_edges, edge_color='#87CEEB',
+                                         width=2.0, alpha=0.6, ax=ax, arrows=False)
+                if extended_edges:
+                    nx.draw_networkx_edges(G, pos, edgelist=extended_edges, edge_color='#D3D3D3',
+                                         width=1.5, alpha=0.5, ax=ax, arrows=False)
+
+                # Draw nodes with enhanced styling
+                # Draw nodes by level for better control
+                central_nodes = [node for node in G.nodes() if G.nodes[node].get('level', 0) == 0]
+                first_degree_nodes = [node for node in G.nodes() if G.nodes[node].get('level', 0) == 1]
+                second_degree_nodes = [node for node in G.nodes() if G.nodes[node].get('level', 0) == 2]
+                extended_nodes = [node for node in G.nodes() if G.nodes[node].get('level', 0) > 2]
+
+                if central_nodes:
+                    nx.draw_networkx_nodes(G, pos, nodelist=central_nodes, node_color='#DC143C',
+                                         node_size=1200, alpha=0.95, ax=ax, edgecolors='white', linewidths=2)
+                if first_degree_nodes:
+                    nx.draw_networkx_nodes(G, pos, nodelist=first_degree_nodes, node_color='#4169E1',
+                                         node_size=800, alpha=0.85, ax=ax, edgecolors='white', linewidths=2)
+                if second_degree_nodes:
+                    nx.draw_networkx_nodes(G, pos, nodelist=second_degree_nodes, node_color='#32CD32',
+                                         node_size=500, alpha=0.75, ax=ax, edgecolors='white', linewidths=2)
+                if extended_nodes:
+                    nx.draw_networkx_nodes(G, pos, nodelist=extended_nodes, node_color='#FFA500',
+                                         node_size=300, alpha=0.65, ax=ax, edgecolors='white', linewidths=2)
+
+                # Simplified labeling system - show ALL co-author names regardless of network size
+                labels = {}
+                for node in G.nodes():
+                    name = G.nodes[node].get('name', str(node))
+                    level = G.nodes[node].get('level', 0)
+
+                    # Format names based on collaboration level with visual indicators
+                    if level == 0:
+                        # Central author - highlighted with star
+                        if len(name) > 35:
+                            name = name[:32] + "..."
+                        labels[node] = f"⭐ {name}"
+                    elif level == 1:
+                        # Direct collaborators - full names
+                        if len(name) > 30:
+                            name = name[:27] + "..."
+                        labels[node] = name
+                    elif level == 2:
+                        # 2nd degree collaborators - with bullet point
+                        if len(name) > 25:
+                            name = name[:22] + "..."
+                        labels[node] = f"• {name}"
+                    else:
+                        # Extended network - shorter names
+                        if len(name) > 20:
+                            name = name[:17] + "..."
+                        labels[node] = name
+
+                # Draw all labels with consistent styling
+                if labels:
+                    nx.draw_networkx_labels(G, pos, labels, font_size=8, font_weight='bold',
+                                          font_color='black', ax=ax,
+                                          bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.8))
+
+                # Add a note about the comprehensive labeling
+                labeling_note = f"📝 Showing all {node_count} co-author names"
+                ax.text(0.02, 0.02, labeling_note, transform=ax.transAxes,
+                       fontsize=9, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8))
+
+                # Add title and styling
+                plt.title(f'Author Collaboration Network\n{selected_author}',
+                         fontsize=16, fontweight='bold', pad=20)
+
+                # Add legend
+                from matplotlib.lines import Line2D
+                legend_elements = [
+                    Line2D([0], [0], marker='o', color='w', markerfacecolor='#DC143C',
+                             markersize=15, label='Central Author'),
+                    Line2D([0], [0], marker='o', color='w', markerfacecolor='#4169E1',
+                             markersize=12, label='Direct Collaborators'),
+                    Line2D([0], [0], marker='o', color='w', markerfacecolor='#32CD32',
+                             markersize=10, label='2nd Degree Connections'),
+                    Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFA500',
+                             markersize=8, label='Extended Network')
+                ]
+
+                ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(0, 1),
+                         fontsize=10, framealpha=0.9)
+
+                plt.axis('off')
+                plt.tight_layout()
+
+                # Display the network
+                st.pyplot(fig)
+
+                # Show degree breakdown
+                level_counts = {}
+                for node in G.nodes():
+                    level = G.nodes[node].get('level', 0)
+                    level_counts[level] = level_counts.get(level, 0) + 1
+
+                st.write("**Network Breakdown by Degree:**")
+                for level in sorted(level_counts.keys()):
+                    if level == 0:
+                        st.write(f"- Central Author: {level_counts[level]} researcher")
+                    else:
+                        degree_text = "1st" if level == 1 else "2nd" if level == 2 else f"{level}th"
+                        st.write(f"- {degree_text} Degree: {level_counts[level]} researchers")
+
+                # Network statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Nodes", node_count)
+                with col2:
+                    st.metric("Total Connections", edge_count)
+                with col3:
+                    if node_count > 1:
+                        density = nx.density(G)
+                        st.metric("Network Density", f"{density:.3f}")
+
+            except Exception as e:
+                st.error(f"Error creating visualization: {str(e)}")
+                st.info("Try downloading the Gephi file instead for network analysis.")
+
     except ImportError:
         st.error("NetworkX and matplotlib are required for network visualization. Please install them:")
         st.code("pip install networkx matplotlib")
     except Exception as e:
         st.error(f"Error generating network: {str(e)}")
+        st.info("💡 Try with a different author or reduce the degrees of separation.")
 
 def generate_institution_network(df):
     """Generate institution collaboration network"""
@@ -1461,7 +1696,7 @@ def generate_institution_network(df):
         if len(G.nodes()) > 1:
             # Filter to show only institutions with multiple connections
             min_connections = st.slider("Minimum connections", 1, 10, 2)
-            nodes_to_remove = [node for node in G.nodes() if G.degree(node) < min_connections]
+            nodes_to_remove = [node for node in G.nodes() if len(G[node]) < min_connections]
             G.remove_nodes_from(nodes_to_remove)
             
             if len(G.nodes()) > 1:
@@ -1470,13 +1705,18 @@ def generate_institution_network(df):
                 pos = nx.spring_layout(G, k=2, iterations=50)
                 
                 # Node sizes based on degree
-                node_sizes = [G.degree(node) * 100 for node in G.nodes()]
-                
+                node_sizes = [len(G[node]) * 100 for node in G.nodes()]
+
                 # Edge widths based on collaboration strength
                 edge_widths = [G[u][v]['weight'] * 0.5 for u, v in G.edges()]
-                
-                nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color='lightblue', alpha=0.7)
-                nx.draw_networkx_edges(G, pos, width=edge_widths, alpha=0.5)
+
+                # Draw nodes and edges with proper styling
+                for node, size in zip(G.nodes(), node_sizes):
+                    nx.draw_networkx_nodes(G, pos, nodelist=[node], node_size=size,
+                                         node_color='lightblue', alpha=0.7)
+
+                for (u, v), width in zip(G.edges(), edge_widths):
+                    nx.draw_networkx_edges(G, pos, edgelist=[(u, v)], width=width, alpha=0.5)
                 
                 # Add labels
                 labels = {node: node[:20] + "..." if len(node) > 20 else node for node in G.nodes()}
@@ -1511,83 +1751,88 @@ def generate_country_network(df):
     try:
         import networkx as nx
         import matplotlib.pyplot as plt
-        
+
         st.subheader("🌍 Country Collaboration Network")
-        
+
         # Filter out unwanted countries
         filtered_df = df[df["country"].notna()]
         filtered_df = filtered_df[~filtered_df["country"].str.lower().isin(['unknown', 'academic institution', 'international'])]
-        
+
         # Create country network
         G = nx.Graph()
-        
+
         for idx, row in filtered_df.iterrows():
             country = row.get("country")
             coauthors = row.get("coauthors")
-            
+
             if pd.notna(country) and pd.notna(coauthors) and coauthors:
                 try:
                     if isinstance(coauthors, str) and coauthors.startswith('['):
                         coauthor_list = ast.literal_eval(coauthors)
-                        
+
                         for coauthor in coauthor_list:
                             if isinstance(coauthor, dict):
                                 coauthor_name = coauthor.get("name", "")
                             else:
                                 coauthor_name = str(coauthor)
-                            
+
                             coauthor_data = df[df["name"] == coauthor_name]
                             if not coauthor_data.empty:
                                 coauthor_country = coauthor_data.iloc[0].get("country")
-                                if (pd.notna(coauthor_country) and 
+                                if (pd.notna(coauthor_country) and
                                     coauthor_country != country and
                                     coauthor_country.lower() not in ['unknown', 'academic institution', 'international']):
-                                    
+
                                     G.add_node(country)
                                     G.add_node(coauthor_country)
-                                    
+
                                     if G.has_edge(country, coauthor_country):
                                         G[country][coauthor_country]['weight'] += 1
                                     else:
                                         G.add_edge(country, coauthor_country, weight=1)
                 except:
                     pass
-        
+
         if len(G.nodes()) > 1:
             # Filter to show meaningful connections
             min_connections = st.slider("Minimum international collaborations", 1, 20, 5)
             edges_to_remove = [(u, v) for u, v in G.edges() if G[u][v]['weight'] < min_connections]
             G.remove_edges_from(edges_to_remove)
-            
+
             # Remove isolated nodes
-            isolated_nodes = [node for node in G.nodes() if G.degree(node) == 0]
+            isolated_nodes = [node for node in G.nodes() if len(G[node]) == 0]
             G.remove_nodes_from(isolated_nodes)
-            
+
             if len(G.nodes()) > 1:
                 fig, ax = plt.subplots(figsize=(14, 10))
-                
+
                 pos = nx.spring_layout(G, k=3, iterations=50)
-                
+
                 # Node sizes based on total collaborations
                 node_sizes = [sum([G[node][neighbor]['weight'] for neighbor in G.neighbors(node)]) * 5 for node in G.nodes()]
-                
+
                 # Edge widths based on collaboration strength
                 edge_widths = [G[u][v]['weight'] * 0.1 for u, v in G.edges()]
-                
-                nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color='lightgreen', alpha=0.7)
-                nx.draw_networkx_edges(G, pos, width=edge_widths, alpha=0.6)
+
+                # Draw nodes and edges with proper styling
+                for node, size in zip(G.nodes(), node_sizes):
+                    nx.draw_networkx_nodes(G, pos, nodelist=[node], node_size=size,
+                                         node_color='lightgreen', alpha=0.7)
+
+                for (u, v), width in zip(G.edges(), edge_widths):
+                    nx.draw_networkx_edges(G, pos, edgelist=[(u, v)], width=width, alpha=0.6)
                 nx.draw_networkx_labels(G, pos, font_size=10, font_weight='bold')
-                
+
                 plt.title(f"International Collaboration Network\n({len(G.nodes())} countries, {len(G.edges())} collaboration pairs)")
                 plt.axis('off')
                 plt.tight_layout()
-                
+
                 st.pyplot(fig)
-                
+
                 # Top collaborating countries
                 degree_centrality = nx.degree_centrality(G)
                 top_countries = sorted(degree_centrality.items(), key=lambda x: x[1], reverse=True)[:10]
-                
+
                 st.subheader("🔝 Most Internationally Connected Countries")
                 for i, (country, centrality) in enumerate(top_countries, 1):
                     st.write(f"{i}. **{country}** - Centrality: {centrality:.3f}")
@@ -1595,12 +1840,61 @@ def generate_country_network(df):
                 st.warning("No country network found with the current filter settings.")
         else:
             st.warning("Insufficient data to generate country collaboration network.")
-            
+
     except ImportError:
         st.error("NetworkX and matplotlib are required. Please install them:")
         st.code("pip install networkx matplotlib")
     except Exception as e:
         st.error(f"Error generating country network: {str(e)}")
+
+def generate_gephi_file(G, central_author):
+    """Generate GEXF format file for Gephi"""
+    from datetime import datetime
+
+    # Create GEXF content
+    gexf_content = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    gexf_content += '<gexf xmlns="http://www.gexf.net/1.2draft" version="1.2">\n'
+    gexf_content += '  <meta lastmodifieddate="' + datetime.now().strftime('%Y-%m-%d') + '">\n'
+    gexf_content += '    <creator>Scholar Scraper Dashboard</creator>\n'
+    gexf_content += '    <description>Author collaboration network centered on ' + central_author + '</description>\n'
+    gexf_content += '  </meta>\n'
+    gexf_content += '  <graph mode="static" defaultedgetype="undirected">\n'
+
+    # Add node attributes
+    gexf_content += '    <attributes class="node">\n'
+    gexf_content += '      <attribute id="name" title="Name" type="string"/>\n'
+    gexf_content += '      <attribute id="type" title="Type" type="string"/>\n'
+    gexf_content += '      <attribute id="level" title="Level" type="integer"/>\n'
+    gexf_content += '    </attributes>\n'
+
+    # Add nodes
+    gexf_content += '    <nodes>\n'
+    for node_id, node_data in G.nodes(data=True):
+        name = node_data.get('name', str(node_id))
+        node_type = node_data.get('type', 'collaborator')
+        level = node_data.get('level', 0)
+
+        gexf_content += f'      <node id="{node_id}" label="{name}">\n'
+        gexf_content += '        <attvalues>\n'
+        gexf_content += f'          <attvalue for="name" value="{name}"/>\n'
+        gexf_content += f'          <attvalue for="type" value="{node_type}"/>\n'
+        gexf_content += f'          <attvalue for="level" value="{level}"/>\n'
+        gexf_content += '        </attvalues>\n'
+        gexf_content += '      </node>\n'
+    gexf_content += '    </nodes>\n'
+
+    # Add edges
+    gexf_content += '    <edges>\n'
+    edge_id = 0
+    for source, target in G.edges():
+        gexf_content += f'      <edge id="{edge_id}" source="{source}" target="{target}"/>\n'
+        edge_id += 1
+    gexf_content += '    </edges>\n'
+
+    gexf_content += '  </graph>\n'
+    gexf_content += '</gexf>'
+
+    return gexf_content
 
 def show_downloads():
     """Display download options"""
