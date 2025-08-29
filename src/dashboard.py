@@ -1349,8 +1349,8 @@ def generate_author_network(df, selected_author, degrees):
         # Build network with proper limits to prevent infinite loops
         added_nodes = {selected_author}
         current_level_nodes = [(selected_author, 0)]
-        max_nodes = 200  # Hard limit to prevent memory issues
-        max_edges_per_node = 10  # Limit connections per node
+        max_nodes = 20000  # Hard limit to prevent memory issues
+        max_edges_per_node = 21  # Limit connections per node
 
         for level in range(degrees):
             if len(G.nodes()) >= max_nodes:
