@@ -14,13 +14,19 @@ import plotly.express as px
 
 # === Coauthor Name Mapping Utility ===
 def build_userid_to_name_map(df):
-    """Build a mapping from user_id to name for all researchers."""
-    if "user_id" in df.columns and "name" in df.columns:
-        return dict(zip(df["user_id"].astype(str), df["name"].astype(str)))
-    return {}
+    """Build a mapping from user_id to name for all researchers using cached lookup tables."""
+    lookup_tables = get_lookup_tables()
+    return lookup_tables.get('user_id_to_name', {})
 
 def coauthor_names_from_str(coauthors_str, userid_to_name):
-    """Convert coauthor user_ids in a string/list to names, fallback to user_id if name not found."""
+    """Convert coauthor user_ids in a string/list to names using cached lookup tables."""
+    lookup_tables = get_lookup_tables()
+    cached_user_id_to_name = lookup_tables.get('user_id_to_name', {})
+
+    # Use cached mapping if available, otherwise fall back to provided mapping
+    if cached_user_id_to_name:
+        userid_to_name = cached_user_id_to_name
+
     import ast
     if not coauthors_str or pd.isna(coauthors_str):
         return []
@@ -76,12 +82,14 @@ PROFILES_FILE = get_profiles_file_path()
 
 # === Cache for DataFrame ===
 _PROFILES_DF_CACHE = None
+_LOOKUP_TABLES_CACHE = None
 
 # Clear cache to force reload with country standardization
 def clear_profiles_cache():
     """Clear the cached profiles DataFrame to force reload"""
-    global _PROFILES_DF_CACHE
+    global _PROFILES_DF_CACHE, _LOOKUP_TABLES_CACHE
     _PROFILES_DF_CACHE = None
+    _LOOKUP_TABLES_CACHE = None
 
 def get_profiles_df():
     """Load profiles CSV once and cache result to avoid repeated disk I/O."""
@@ -92,11 +100,11 @@ def get_profiles_df():
                 df = pd.read_csv(PROFILES_FILE, engine='python', on_bad_lines='skip')
                 df.replace(["NaN", "nan", ""], np.nan, inplace=True)
                 df.columns = [c.strip() for c in df.columns]
-                
+
                 # Standardize country names
                 if 'country' in df.columns:
                     df['country'] = df['country'].apply(standardize_country_name)
-                
+
                 _PROFILES_DF_CACHE = df
             except Exception as e:
                 st.error(f"Error loading profiles: {e}")
@@ -104,6 +112,68 @@ def get_profiles_df():
         else:
             _PROFILES_DF_CACHE = pd.DataFrame()
     return _PROFILES_DF_CACHE
+
+def get_lookup_tables():
+    """Build and cache comprehensive lookup tables for efficient data access."""
+    global _LOOKUP_TABLES_CACHE
+    if _LOOKUP_TABLES_CACHE is None:
+        df = get_profiles_df()
+        if df.empty:
+            _LOOKUP_TABLES_CACHE = {}
+            return _LOOKUP_TABLES_CACHE
+
+        st.info("🔄 Building comprehensive lookup tables... (one-time preprocessing)")
+
+        # Build lookup dictionaries in a single pass through the data
+        name_to_data = {}
+        name_to_coauthors = {}
+        user_id_to_name = {}
+        name_to_user_id = {}
+
+        for idx, row in df.iterrows():
+            name = row.get("name", "")
+            user_id = row.get("user_id", "")
+            coauthors = row.get("coauthors", "")
+
+            if name:
+                name_to_data[name] = row
+                if user_id:
+                    user_id_to_name[user_id] = name
+                    name_to_user_id[name] = user_id
+
+                # Process coauthors in the same pass
+                if pd.notna(coauthors) and coauthors:
+                    try:
+                        if isinstance(coauthors, str) and coauthors.startswith('['):
+                            coauthor_list = ast.literal_eval(coauthors)
+                            # Convert user IDs to names
+                            coauthor_names = []
+                            for coauthor_id in coauthor_list:
+                                if isinstance(coauthor_id, str) and coauthor_id in user_id_to_name:
+                                    coauthor_names.append(user_id_to_name[coauthor_id])
+                                elif isinstance(coauthor_id, dict) and coauthor_id.get("user_id") in user_id_to_name:
+                                    coauthor_names.append(user_id_to_name[coauthor_id.get("user_id")])
+                            name_to_coauthors[name] = coauthor_names[:20]  # Limit to prevent explosion
+                        elif isinstance(coauthors, list):
+                            coauthor_names = []
+                            for coauthor_id in coauthors:
+                                if isinstance(coauthor_id, str) and coauthor_id in user_id_to_name:
+                                    coauthor_names.append(user_id_to_name[coauthor_id])
+                            name_to_coauthors[name] = coauthor_names[:20]
+                    except Exception as e:
+                        # Skip problematic coauthor data
+                        continue
+
+        _LOOKUP_TABLES_CACHE = {
+            'name_to_data': name_to_data,
+            'name_to_coauthors': name_to_coauthors,
+            'user_id_to_name': user_id_to_name,
+            'name_to_user_id': name_to_user_id
+        }
+
+        st.success(f"✅ Lookup tables built! Processed {len(name_to_data)} authors with {len(user_id_to_name)} user mappings.")
+
+    return _LOOKUP_TABLES_CACHE
 
 # === Country Standardization ===
 COUNTRY_MAPPING = {
@@ -1146,85 +1216,77 @@ def show_network():
     with col1:
         st.subheader("🔗 Generate Collaboration Network")
         
-        # Network type selection
-        network_type = st.selectbox(
-            "Network Type",
-            ["Author Collaboration"],
-            help="Choose the type of network to visualize"
+        # Author search for network center
+        search_query = st.text_input(
+            "Search for author to center network around",
+            placeholder="e.g., Geoffrey Hinton",
+            help="The network will be built around this author and their collaborators"
         )
-
-        if network_type == "Author Collaboration":
-            # Author search for network center
-            search_query = st.text_input(
-                "Search for author to center network around",
-                placeholder="e.g., Geoffrey Hinton",
-                help="The network will be built around this author and their collaborators"
-            )
-            
-            if search_query:
-                # Find matching authors
-                matches = df[df["name"].str.contains(search_query, case=False, na=False)]
-                if not matches.empty:
-                    # Create detailed options for author selection
-                    author_options = []
-                    author_details = {}
+        
+        if search_query:
+            # Find matching authors
+            matches = df[df["name"].str.contains(search_query, case=False, na=False)]
+            if not matches.empty:
+                # Create detailed options for author selection
+                author_options = []
+                author_details = {}
+                
+                for idx, row in matches.iterrows():
+                    name = row.get("name", "Unknown")
+                    institution = row.get("institution", "Unknown")
+                    country = row.get("country", "Unknown")
+                    h_index = row.get("h_index_all", "N/A")
+                    citations = row.get("citations_all", "N/A")
                     
-                    for idx, row in matches.iterrows():
-                        name = row.get("name", "Unknown")
-                        institution = row.get("institution", "Unknown")
-                        country = row.get("country", "Unknown")
-                        h_index = row.get("h_index_all", "N/A")
-                        citations = row.get("citations_all", "N/A")
+                    # Format citations with commas
+                    if pd.notna(citations) and citations != "N/A":
+                        try:
+                            citations_formatted = f"{int(float(citations)):,}"
+                        except:
+                            citations_formatted = str(citations)
+                    else:
+                        citations_formatted = "N/A"
+                    
+                    # Create a detailed display option
+                    option_text = f"{name} | {institution} | {country} | H-index: {h_index} | Citations: {citations_formatted}"
+                    author_options.append(option_text)
+                    author_details[option_text] = name
+                
+                # Show author details for selection
+                if len(author_options) > 1:
+                    st.info(f"Found {len(author_options)} researchers matching '{search_query}'. Please select one:")
+                    
+                    # Display options in an expander for better visibility
+                    with st.expander("📋 Author Comparison", expanded=True):
+                        comparison_df = matches[["name", "institution", "country", "h_index_all", "citations_all"]].copy()
+                        comparison_df.columns = ["Name", "Institution", "Country", "H-Index", "Citations"]
                         
-                        # Format citations with commas
-                        if pd.notna(citations) and citations != "N/A":
-                            try:
-                                citations_formatted = f"{int(float(citations)):,}"
-                            except:
-                                citations_formatted = str(citations)
-                        else:
-                            citations_formatted = "N/A"
+                        # Format citations column
+                        comparison_df["Citations"] = comparison_df["Citations"].apply(
+                            lambda x: f"{int(float(x)):,}" if pd.notna(x) and x != "N/A" else "N/A"
+                        )
                         
-                        # Create a detailed display option
-                        option_text = f"{name} | {institution} | {country} | H-index: {h_index} | Citations: {citations_formatted}"
-                        author_options.append(option_text)
-                        author_details[option_text] = name
-                    
-                    # Show author details for selection
-                    if len(author_options) > 1:
-                        st.info(f"Found {len(author_options)} researchers matching '{search_query}'. Please select one:")
-                        
-                        # Display options in an expander for better visibility
-                        with st.expander("📋 Author Comparison", expanded=True):
-                            comparison_df = matches[["name", "institution", "country", "h_index_all", "citations_all"]].copy()
-                            comparison_df.columns = ["Name", "Institution", "Country", "H-Index", "Citations"]
-                            
-                            # Format citations column
-                            comparison_df["Citations"] = comparison_df["Citations"].apply(
-                                lambda x: f"{int(float(x)):,}" if pd.notna(x) and x != "N/A" else "N/A"
-                            )
-                            
-                            st.dataframe(comparison_df, use_container_width=True)
-                    
-                    selected_option = st.selectbox(
-                        "Select Author (Name | Institution | Country | H-index | Citations)",
-                        author_options,
-                        help="Choose the specific author from search results"
-                    )
-                    
-                    selected_author = author_details[selected_option]
-                    
-                    degree_choice = st.selectbox(
-                        "Degrees of Separation",
-                        [1, 2, 3],
-                        index=0,
-                        help="How many degrees of separation to include"
-                    )
-                    
-                    if st.button("🚀 Generate Author Network"):
-                        generate_author_network(df, selected_author, degree_choice)
-                else:
-                    st.warning("No authors found matching your search.")
+                        st.dataframe(comparison_df, use_container_width=True)
+                
+                selected_option = st.selectbox(
+                    "Select Author (Name | Institution | Country | H-index | Citations)",
+                    author_options,
+                    help="Choose the specific author from search results"
+                )
+                
+                selected_author = author_details[selected_option]
+                
+                degree_choice = st.selectbox(
+                    "Degrees of Separation",
+                    [1, 2, 3],
+                    index=0,
+                    help="How many degrees of separation to include"
+                )
+                
+                if st.button("🚀 Generate Author Network"):
+                    generate_author_network(df, selected_author, degree_choice)
+            else:
+                st.warning("No authors found matching your search.")
     
     with col2:
         st.subheader("📊 Network Statistics")
@@ -1319,47 +1381,15 @@ def generate_author_network(df, selected_author, degrees):
             st.error(f"Author '{selected_author}' not found in the dataset.")
             return
 
-        # Create efficient lookup dictionaries for better performance
-        st.info("🔄 Building author lookup tables...")
-        name_to_data = {}
-        name_to_coauthors = {}
-        user_id_to_name = {}
+        # Use cached lookup tables for better performance
+        st.info("🔄 Using cached lookup tables for network analysis...")
+        lookup_tables = get_lookup_tables()
 
-        for idx, row in df.iterrows():
-            name = row.get("name", "")
-            user_id = row.get("user_id", "")
-            if name:
-                name_to_data[name] = row
-                if user_id:
-                    user_id_to_name[user_id] = name
+        name_to_data = lookup_tables.get('name_to_data', {})
+        name_to_coauthors = lookup_tables.get('name_to_coauthors', {})
+        user_id_to_name = lookup_tables.get('user_id_to_name', {})
 
-        # Second pass to build coauthor relationships
-        for idx, row in df.iterrows():
-            name = row.get("name", "")
-            coauthors = row.get("coauthors", "")
-            if name and pd.notna(coauthors) and coauthors:
-                try:
-                    if isinstance(coauthors, str) and coauthors.startswith('['):
-                        coauthor_list = ast.literal_eval(coauthors)
-                        # Convert user IDs to names
-                        coauthor_names = []
-                        for coauthor_id in coauthor_list:
-                            if isinstance(coauthor_id, str) and coauthor_id in user_id_to_name:
-                                coauthor_names.append(user_id_to_name[coauthor_id])
-                            elif isinstance(coauthor_id, dict) and coauthor_id.get("user_id") in user_id_to_name:
-                                coauthor_names.append(user_id_to_name[coauthor_id.get("user_id")])
-                        name_to_coauthors[name] = coauthor_names[:20]  # Limit to prevent explosion
-                    elif isinstance(coauthors, list):
-                        coauthor_names = []
-                        for coauthor_id in coauthors:
-                            if isinstance(coauthor_id, str) and coauthor_id in user_id_to_name:
-                                coauthor_names.append(user_id_to_name[coauthor_id])
-                        name_to_coauthors[name] = coauthor_names[:20]
-                except Exception as e:
-                    # Skip problematic coauthor data
-                    continue
-
-        st.info(f"✅ Processed {len(name_to_data)} authors and {len(user_id_to_name)} user mappings for network analysis")
+        st.info(f"✅ Loaded {len(name_to_data)} authors and {len(user_id_to_name)} user mappings from cache")
 
         # Create network graph
         G = nx.Graph()
