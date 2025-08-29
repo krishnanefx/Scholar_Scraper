@@ -1279,6 +1279,51 @@ def show_network():
                     st.metric("Avg Co-authors", f"{avg_coauthors:.1f}")
                     st.metric("Max Co-authors", max(coauthor_counts))
 
+def calculate_node_sizes(G, min_size=200, max_size=1500, base_size=400):
+    """Calculate node sizes based on H-index values"""
+    h_indices = []
+    for node in G.nodes():
+        h_index = G.nodes[node].get('h_index', 0)
+        h_indices.append(h_index)
+    
+    if not h_indices or all(h == 0 for h in h_indices):
+        # If no H-index data, use default sizes based on level
+        node_sizes = []
+        for node in G.nodes():
+            level = G.nodes[node].get('level', 0)
+            if level == 0:
+                node_sizes.append(1200)  # Central author
+            elif level == 1:
+                node_sizes.append(800)   # Direct collaborators
+            elif level == 2:
+                node_sizes.append(500)   # 2nd degree
+            else:
+                node_sizes.append(300)   # Extended network
+        return node_sizes
+    
+    # Calculate sizes based on H-index
+    min_h = min(h_indices)
+    max_h = max(h_indices)
+    
+    # Avoid division by zero
+    if max_h == min_h:
+        return [base_size] * len(G.nodes())
+    
+    node_sizes = []
+    for node in G.nodes():
+        h_index = G.nodes[node].get('h_index', 0)
+        # Scale H-index to size range, with minimum size for visibility
+        if h_index == 0:
+            size = min_size
+        else:
+            # Logarithmic scaling for better visual differentiation
+            size = min_size + (max_size - min_size) * (h_index - min_h) / (max_h - min_h)
+            # Ensure minimum size
+            size = max(size, min_size)
+        node_sizes.append(size)
+    
+    return node_sizes
+
 def generate_author_network(df, selected_author, degrees):
     """Generate and display author collaboration network"""
     try:
@@ -1344,7 +1389,17 @@ def generate_author_network(df, selected_author, degrees):
         G = nx.Graph()
 
         # Add central author
-        G.add_node(selected_author, name=selected_author, type="central", level=0)
+        central_author_data = name_to_data.get(selected_author)
+        central_h_index = 0
+        if central_author_data is not None:
+            try:
+                h_index_val = central_author_data.get("h_index_all")
+                if pd.notna(h_index_val) and h_index_val != "N/A":
+                    central_h_index = float(h_index_val)
+            except:
+                central_h_index = 0
+        
+        G.add_node(selected_author, name=selected_author, type="central", level=0, h_index=central_h_index)
 
         # Build network with proper limits to prevent infinite loops
         added_nodes = {selected_author}
@@ -1375,8 +1430,19 @@ def generate_author_network(df, selected_author, degrees):
                             if coauthor_name in name_to_data:
                                 if coauthor_name not in added_nodes:
                                     if len(G.nodes()) < max_nodes:
+                                        # Get H-index for this coauthor
+                                        coauthor_data = name_to_data.get(coauthor_name)
+                                        coauthor_h_index = 0
+                                        if coauthor_data is not None:
+                                            try:
+                                                h_index_val = coauthor_data.get("h_index_all")
+                                                if pd.notna(h_index_val) and h_index_val != "N/A":
+                                                    coauthor_h_index = float(h_index_val)
+                                            except:
+                                                coauthor_h_index = 0
+                                        
                                         G.add_node(coauthor_name, name=coauthor_name,
-                                                 type="collaborator", level=current_level+1)
+                                                 type="collaborator", level=current_level+1, h_index=coauthor_h_index)
                                         added_nodes.add(coauthor_name)
                                         next_level_nodes.append((coauthor_name, current_level+1))
 
@@ -1472,28 +1538,24 @@ def generate_author_network(df, selected_author, degrees):
                     # For larger networks, use Fruchterman-Reingold (good balance)
                     pos = nx.fruchterman_reingold_layout(G, k=1.5, iterations=100, seed=42)
 
-                # Enhanced node styling with better colors and sizes
+                # Enhanced node styling with H-index-based sizes
                 node_colors = []
-                node_sizes = []
+                node_sizes = calculate_node_sizes(G)  # Use H-index for sizing
                 node_alphas = []
 
                 for node in G.nodes():
                     level = G.nodes[node].get('level', 0)
                     if level == 0:
                         node_colors.append('#DC143C')  # Crimson red for central author
-                        node_sizes.append(1200)
                         node_alphas.append(0.95)
                     elif level == 1:
                         node_colors.append('#4169E1')  # Royal blue for direct collaborators
-                        node_sizes.append(800)
                         node_alphas.append(0.85)
                     elif level == 2:
                         node_colors.append('#32CD32')  # Lime green for 2nd degree
-                        node_sizes.append(500)
                         node_alphas.append(0.75)
                     else:
                         node_colors.append('#FFA500')  # Orange for extended network
-                        node_sizes.append(300)
                         node_alphas.append(0.65)
 
                 # Draw edges with varying thickness based on connection strength
@@ -1528,25 +1590,33 @@ def generate_author_network(df, selected_author, degrees):
                     nx.draw_networkx_edges(G, pos, edgelist=extended_edges, edge_color='#D3D3D3',
                                          width=1.5, alpha=0.5, ax=ax, arrows=False)
 
-                # Draw nodes with enhanced styling
-                # Draw nodes by level for better control
-                central_nodes = [node for node in G.nodes() if G.nodes[node].get('level', 0) == 0]
-                first_degree_nodes = [node for node in G.nodes() if G.nodes[node].get('level', 0) == 1]
-                second_degree_nodes = [node for node in G.nodes() if G.nodes[node].get('level', 0) == 2]
-                extended_nodes = [node for node in G.nodes() if G.nodes[node].get('level', 0) > 2]
+                # Draw nodes with H-index-based sizing (individual node approach)
+                # Create node size mapping
+                node_size_map = dict(zip(G.nodes(), node_sizes))
 
-                if central_nodes:
-                    nx.draw_networkx_nodes(G, pos, nodelist=central_nodes, node_color='#DC143C',
-                                         node_size=1200, alpha=0.95, ax=ax, edgecolors='white', linewidths=2)
-                if first_degree_nodes:
-                    nx.draw_networkx_nodes(G, pos, nodelist=first_degree_nodes, node_color='#4169E1',
-                                         node_size=800, alpha=0.85, ax=ax, edgecolors='white', linewidths=2)
-                if second_degree_nodes:
-                    nx.draw_networkx_nodes(G, pos, nodelist=second_degree_nodes, node_color='#32CD32',
-                                         node_size=500, alpha=0.75, ax=ax, edgecolors='white', linewidths=2)
-                if extended_nodes:
-                    nx.draw_networkx_nodes(G, pos, nodelist=extended_nodes, node_color='#FFA500',
-                                         node_size=300, alpha=0.65, ax=ax, edgecolors='white', linewidths=2)
+                # Draw each node individually with its H-index-based size
+                for node in G.nodes():
+                    level = G.nodes[node].get('level', 0)
+                    node_size = node_size_map[node]
+
+                    # Set color based on level
+                    if level == 0:
+                        color = '#DC143C'  # Crimson red for central author
+                        alpha = 0.95
+                    elif level == 1:
+                        color = '#4169E1'  # Royal blue for direct collaborators
+                        alpha = 0.85
+                    elif level == 2:
+                        color = '#32CD32'  # Lime green for 2nd degree
+                        alpha = 0.75
+                    else:
+                        color = '#FFA500'  # Orange for extended network
+                        alpha = 0.65
+
+                    # Draw individual node
+                    nx.draw_networkx_nodes(G, pos, nodelist=[node], node_color=color,
+                                         node_size=node_size, alpha=alpha, ax=ax,
+                                         edgecolors='white', linewidths=2)
 
                 # Simplified labeling system - show ALL co-author names regardless of network size
                 labels = {}
@@ -1588,10 +1658,10 @@ def generate_author_network(df, selected_author, degrees):
                        fontsize=9, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8))
 
                 # Add title and styling
-                plt.title(f'Author Collaboration Network\n{selected_author}',
-                         fontsize=16, fontweight='bold', pad=20)
+                plt.title(f'Author Collaboration Network\n{selected_author}\n(Node sizes represent H-index)',
+                         fontsize=14, fontweight='bold', pad=20)
 
-                # Add legend
+                # Add legend with H-index information
                 from matplotlib.lines import Line2D
                 legend_elements = [
                     Line2D([0], [0], marker='o', color='w', markerfacecolor='#DC143C',
@@ -1601,7 +1671,9 @@ def generate_author_network(df, selected_author, degrees):
                     Line2D([0], [0], marker='o', color='w', markerfacecolor='#32CD32',
                              markersize=10, label='2nd Degree Connections'),
                     Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFA500',
-                             markersize=8, label='Extended Network')
+                             markersize=8, label='Extended Network'),
+                    Line2D([0], [0], marker='o', color='w', markerfacecolor='lightgray',
+                             markersize=6, label='Node size = H-index')
                 ]
 
                 ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(0, 1),
@@ -1637,6 +1709,21 @@ def generate_author_network(df, selected_author, degrees):
                     if node_count > 1:
                         density = nx.density(G)
                         st.metric("Network Density", f"{density:.3f}")
+
+                # H-index statistics for the network
+                h_indices = [G.nodes[node].get('h_index', 0) for node in G.nodes()]
+                if h_indices and any(h > 0 for h in h_indices):
+                    valid_h_indices = [h for h in h_indices if h > 0]
+                    if valid_h_indices:
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Avg H-Index", f"{np.mean(valid_h_indices):.1f}")
+                        with col2:
+                            st.metric("Max H-Index", f"{max(valid_h_indices):.0f}")
+                        with col3:
+                            st.metric("Min H-Index", f"{min(valid_h_indices):.0f}")
+                        
+                        st.info("💡 **Node sizes are proportional to H-index values** - larger nodes indicate higher H-index scores")
 
             except Exception as e:
                 st.error(f"Error creating visualization: {str(e)}")
@@ -1865,6 +1952,7 @@ def generate_gephi_file(G, central_author):
     gexf_content += '      <attribute id="name" title="Name" type="string"/>\n'
     gexf_content += '      <attribute id="type" title="Type" type="string"/>\n'
     gexf_content += '      <attribute id="level" title="Level" type="integer"/>\n'
+    gexf_content += '      <attribute id="h_index" title="H-Index" type="float"/>\n'
     gexf_content += '    </attributes>\n'
 
     # Add nodes
@@ -1873,12 +1961,14 @@ def generate_gephi_file(G, central_author):
         name = node_data.get('name', str(node_id))
         node_type = node_data.get('type', 'collaborator')
         level = node_data.get('level', 0)
+        h_index = node_data.get('h_index', 0)
 
         gexf_content += f'      <node id="{node_id}" label="{name}">\n'
         gexf_content += '        <attvalues>\n'
         gexf_content += f'          <attvalue for="name" value="{name}"/>\n'
         gexf_content += f'          <attvalue for="type" value="{node_type}"/>\n'
         gexf_content += f'          <attvalue for="level" value="{level}"/>\n'
+        gexf_content += f'          <attvalue for="h_index" value="{h_index}"/>\n'
         gexf_content += '        </attvalues>\n'
         gexf_content += '      </node>\n'
     gexf_content += '    </nodes>\n'
