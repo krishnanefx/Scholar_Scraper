@@ -455,30 +455,6 @@ def show_overview():
     """Display overview statistics and data"""
     st.header("📊 Enhanced Profile Stats")
     
-    # Debug information for deployment
-    if st.checkbox("🔧 Show debug info", value=False):
-        st.write("**Current working directory:**", os.getcwd())
-        st.write("**Script location:**", __file__)
-        st.write("**Looking for profiles at:**", PROFILES_FILE)
-        st.write("**File exists:**", os.path.exists(PROFILES_FILE))
-        
-        # Show what files do exist in common locations
-        possible_locations = [
-            ".",
-            "data",
-            "data/processed",
-            "../data/processed",
-            "./data/processed"
-        ]
-        
-        for location in possible_locations:
-            if os.path.exists(location):
-                try:
-                    files = os.listdir(location)
-                    st.write(f"**Files in {location}:**", files[:10])  # Show first 10 files
-                except:
-                    st.write(f"**Cannot list files in {location}**")
-    
     if not os.path.exists(PROFILES_FILE):
         st.error("📂 No profiles file found yet.")
         st.info("""
@@ -677,8 +653,8 @@ def show_search():
     
     # === Search Input ===
     search_query = st.text_input(
-        "🔎 Enter author name or institution to search",
-        placeholder="e.g., Geoffrey Hinton, Stanford University"
+        "🔎 Enter author name",
+        placeholder="e.g., Geoffrey Hinton"
     )
     
     if search_query:
