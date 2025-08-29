@@ -35,7 +35,7 @@ def clean_name(name):
     
     return name
 
-def match_authors_with_profiles(predicted_participants, scholar_profiles, conference_name, threshold=80):
+def match_authors_with_profiles(predicted_participants, scholar_profiles, conference_name, threshold=95):
     """
     Match predicted participants with scholar profiles using fuzzy string matching
     """
@@ -177,7 +177,7 @@ def match_authors_with_profiles(predicted_participants, scholar_profiles, confer
 def main():
     parser = argparse.ArgumentParser(description='Match conference prediction CSVs with scholar profiles and export Excel reports')
     parser.add_argument('--year', '-y', type=int, default=datetime.datetime.now().year, help='Prediction year to process (default: current year)')
-    parser.add_argument('--threshold', '-t', type=int, default=80, help='Fuzzy matching threshold (0-100)')
+    parser.add_argument('--threshold', '-t', type=int, default=95, help='Fuzzy matching threshold (0-100)')
     args = parser.parse_args()
 
     year = args.year
@@ -290,7 +290,7 @@ def main():
     for conf_name, participants_df in conferences_data.items():
         if not participants_df.empty:
             matched_results, unmatched_results = match_authors_with_profiles(
-                participants_df, scholar_profiles, conf_name, threshold=80
+                participants_df, scholar_profiles, conf_name, threshold=95
             )
             
             if matched_results:
