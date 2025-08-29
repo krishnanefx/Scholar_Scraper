@@ -1,8 +1,5 @@
 # 🎓 Scholar Scraper: ML-Powered Academic Conference Participation Prediction
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-
 **A production-ready system for predicting future conference participation using ensemble machine learning and temporal feature engineering.**
 
 ## 📋 Table of Contents
