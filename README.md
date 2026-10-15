@@ -1,108 +1,96 @@
 # 🎓 Scholar Scraper: ML-Powered Academic Conference Participation Prediction
 
-**A production-ready system for predicting future conference participation using ensemble machine learning and temporal feature engineering.**
-
-## 📋 Table of Contents
-- [Overview](#overview)
-- [Features](#features)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Usage](#usage)
-- [Project Structure](#project-structure)
-- [Performance](#performance)
-- [Contributing](#contributing)
-- [License](#license)
+**Predicting future conference participation with ensemble machine learning and temporal feature engineering.**
 
 ## 🎯 Overview
 
-Scholar Scraper is a comprehensive academic analytics platform that predicts future conference participation across major AI/ML venues (AAAI, NeurIPS, ICLR) using advanced machine learning techniques. The system achieves state-of-the-art performance through temporal feature engineering and ensemble methods.
+Scholar Scraper collects author data from major AI/ML venues (AAAI, NeurIPS, ICLR), builds a database of researcher profiles, and predicts which authors are likely to participate in upcoming editions of each conference.
 
 ### Key Capabilities
-- **Predictive Modeling**: Forecast conference participation with high accuracy
-- **Profile Enrichment**: Match predictions to comprehensive scholar profiles
-- **Interactive Dashboard**: Explore 60,000 researcher profiles with advanced filtering
-- **Network Analysis**: Visualize collaboration networks with Gephi export
-- **Cross-Conference Analysis**: Unified framework for comparative analysis
+- **Predictive modeling** – Forecast per-author participation for AAAI 2026, NeurIPS 2025 and ICLR 2026
+- **Profile enrichment** – Fuzzy-match predicted authors to a database of 60,000 scholar profiles
+- **Interactive dashboard** – Streamlit app to browse, filter and analyze profiles
+- **Network analysis** – Co-author networks with Gephi (`.gexf`) export
+- **Data collection** – Scrapers for conference papers/authors and a Google Scholar profile crawler
 
 ## ✨ Features
 
 ### 🔮 Prediction Engine
-- **Temporal Features**: Exponential decay weighting, Markov transition probabilities
-- **Ensemble Methods**: Gradient Boosting + Logistic Regression with soft voting
-- **Cross-Validation**: Rigorous GroupKFold validation preventing data leakage
-- **Conservative Thresholding**: 85th percentile probability adjustment
+- **Temporal features** – Exponential-decay recency weighting, Markov transition probabilities, participation rate, years since first/last appearance
+- **Ensemble model** – Gradient Boosting + Logistic Regression with soft voting (`VotingClassifier`)
+- **Cross-validation** – 5-fold `GroupKFold` by author to prevent leakage
+- **Conservative thresholding** – Positive predictions use the 85th percentile of training-set probabilities
 
-### 📊 Interactive Dashboard
-- **Profile Browser**: Search and filter 60,000 scholar profiles
-- **Analytics Dashboard**: H-index distributions, geographic analysis, awards tracking
-- **Network Visualization**: Author collaboration networks with comprehensive labeling
-- **Singaporean Co-authors Analysis**: Specialized analysis for Singapore research ecosystem
+### 📊 Dashboard (`src/dashboard.py`)
+- **Overview** – Profile statistics with country filters
+- **Search** – Search and filter authors, sortable tables
+- **Analytics** – H-index/citation distributions, geographic breakdowns, Singaporean co-author analysis
+- **Network** – Per-author collaboration graphs with `.gexf` download
+- **Downloads** – Export data
 
-### 🔗 Data Integration
-- **Profile Matching**: 91% success rate linking predictions to academic profiles
-- **Export Options**: CSV, JSON, Excel formats with fuzzy matching
-- **Gephi Integration**: Network analysis with .gexf export for advanced visualization
+### 🔗 Data Tools
+- **Profile mapping** – `scholar_profile_mapper.py` infers institutions and countries from email domains (`domain_mappings.json`, `institution_to_country_mapping.json`)
+- **Excel report** – Predictions joined with scholar profiles, per-conference summaries and unmatched authors
 
-## �️ Installation
+## 🛠️ Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/krishnanefx/Scholar_Scraper.git
 cd Scholar_Scraper
 
-# Create virtual environment
 python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+pip install pyarrow openpyxl     # needed for .parquet input and .xlsx output (not in requirements.txt)
 ```
+
+The Google Scholar crawler (`src/scrapers/main.py`) uses Selenium and needs Chrome + ChromeDriver (e.g. `brew install chromedriver`).
 
 ## 🚀 Quick Start
 
-### Generate Predictions (5 Minutes)
+The repository already includes processed profiles (`data/processed/scholar_profiles.csv`), trained models (`data/processed/*.pkl`), predictions (`data/predictions/`) and an Excel report (`outputs/`), so you can explore results immediately:
+
 ```bash
-# Run prediction pipeline for all conferences
-python src/models/aaai_predict_authors.py --quiet-warnings
-python src/models/neurips_predict_authors.py --quiet-warnings
-python src/models/iclr_predict_authors.py --quiet-warnings
-
-# Create comprehensive Excel report
-python src/conference_predictions_summary_2026.py --year 2026
-
-# Launch interactive dashboard
 streamlit run src/dashboard.py
 ```
 
-### What You'll Get
-- **5,875 predictions** across AAAI 2026, NeurIPS 2025, ICLR 2026
-- **91% profile matching** success rate
-- **Interactive dashboard** for data exploration
-- **Excel reports** with institutional affiliations and metrics
+### Regenerating predictions
 
-## 📖 Usage
+The raw conference datasets in `data/raw/` are **not committed**; create them with the scrapers first:
 
-### Prediction Scripts
 ```bash
-# Generate predictions for specific conference
+python src/scrapers/aaai_scraper.py      # -> data/raw/aaai25_papers_authors_split.csv
+python src/scrapers/neurips_scraper.py   # -> data/raw/neurips_2020_2024_combined_data.parquet (run from repo root)
+cd src/scrapers && python iclr_scraper.py && cd ../..   # -> data/raw/iclr_enhanced.parquet
+```
+
+Then train and predict:
+
+```bash
 python src/models/aaai_predict_authors.py --quiet-warnings
 python src/models/neurips_predict_authors.py --quiet-warnings
-python src/models/iclr_predict_authors.py --quiet-warnings
+python src/models/iclr_predict_authors.py --quiet-warnings --data-path data/raw/iclr_enhanced.parquet
 ```
 
-### Dashboard
+Each model script accepts `--data-path`, `--output-dir` and `--model-path` (ICLR/NeurIPS also read `ICLR_DATA_PATH` / `NEURIPS_DATA_PATH`). Outputs go to `data/predictions/<conf>_<year>_predictions.csv` and `data/processed/<conf>_participation_model.pkl`.
+
+Build the Excel report:
+
 ```bash
-# Launch interactive dashboard
-streamlit run src/dashboard.py
+python src/conference_predictions_summary_2026.py --year 2026 --threshold 95
+# -> outputs/Conference_Predictions_with_Scholar_Profiles.xlsx
 ```
 
-### Advanced Options
-```bash
-# Custom prediction year and threshold
-python src/conference_predictions_summary_2026.py --year 2027 --threshold 80
+`--year` defaults to the current year; `--threshold` is the fuzzy-matching threshold (0–100, default 95).
 
-# Feature selection for AAAI
-python src/models/aaai_predict_authors.py --feature-selection tree
+### Profile maintenance
+
+```bash
+python src/scrapers/main.py                  # crawl Google Scholar profiles (seeded from a co-author BFS)
+python scholar_profile_mapper.py --stats     # mapping coverage
+python scholar_profile_mapper.py --fix-all   # batch-map institutions/countries
+python scholar_profile_mapper.py --interactive
+python show_remaining_unknowns.py            # list still-unmapped domains
 ```
 
 ## 📁 Project Structure
@@ -110,62 +98,44 @@ python src/models/aaai_predict_authors.py --feature-selection tree
 ```
 Scholar_Scraper/
 ├── src/
-│   ├── models/           # Prediction scripts
-│   │   ├── aaai_predict_authors.py
-│   │   ├── neurips_predict_authors.py
-│   │   └── iclr_predict_authors.py
-│   ├── scrapers/         # Data collection tools
-│   ├── dashboard.py      # Streamlit application
-│   └── conference_predictions_summary_2026.py
+│   ├── models/                 # Training + prediction scripts (AAAI, NeurIPS, ICLR)
+│   ├── scrapers/               # Conference scrapers + Google Scholar crawler (main.py)
+│   ├── dashboard.py            # Streamlit application
+│   └── conference_predictions_summary_2026.py  # Excel report builder
 ├── data/
-│   ├── raw/             # Input datasets
-│   ├── processed/       # Processed data and models
-│   └── predictions/     # Prediction outputs
-├── outputs/             # Excel reports and visualizations
-├── requirements.txt     # Python dependencies
-└── README.md
+│   ├── processed/              # scholar_profiles.csv, trained models (.pkl)
+│   └── predictions/            # Prediction CSVs and threshold analysis plots
+├── outputs/                    # Excel report and performance/participation charts
+├── cache/                      # Crawler queue and lookup caches
+├── scholar_profile_mapper.py   # Institution/country mapping tool
+├── show_remaining_unknowns.py
+├── domain_mappings.json
+├── institution_to_country_mapping.json
+└── requirements.txt
 ```
 
 ## 📊 Performance
 
-### Model Performance Summary
+![Cross-validation performance](outputs/real_auc_performance_analysis.png)
 
-| Conference | Authors | Predictions | AUC | Precision | Recall | F1-Score | Match Rate |
-|------------|---------|-------------|-----|-----------|--------|----------|------------|
-| **AAAI 2026** | 42,580 | 2,108 (5.0%) | **0.861** | **0.894** | 0.629 | 0.739 | **91.6%** |
-| **ICLR 2026** | 27,836 | 1,604 (5.8%) | **0.863** | 0.873 | **0.778** | **0.822** | **90.3%** |
-| **NeurIPS 2025** | 35,705 | 2,194 (6.1%) | 0.840 | 0.875 | 0.693 | 0.773 | **90.4%** |
+| Conference | Authors scored | Predicted participants | CV AUC | Precision | Recall | F1 |
+|------------|---------------:|-----------------------:|-------:|----------:|-------:|---:|
+| **AAAI 2026** | 43,040 | 2,108 (4.9%) | **0.861** ± 0.003 | **0.894** | 0.629 | 0.739 |
+| **ICLR 2026** | 27,836 | 1,604 (5.8%) | **0.863** ± 0.009 | 0.873 | **0.778** | **0.822** |
+| **NeurIPS 2025** | 35,705 | 2,194 (6.1%) | 0.840 ± 0.011 | 0.875 | 0.693 | 0.773 |
 
-### Key Metrics Explained
-- **AUC**: Model's ability to distinguish participants from non-participants
-- **Precision**: Accuracy of positive predictions (fewer false positives)
-- **Recall**: Coverage of actual participants (fewer missed predictions)
-- **F1-Score**: Balanced measure of precision and recall
+In the committed Excel report, 48.7% (AAAI), 67.1% (NeurIPS) and 70.6% (ICLR) of predicted participants were matched to a scholar profile at the default fuzzy threshold of 95.
 
-## 📄 License
+More charts: `outputs/roc_curves_actual_auc.png`, `outputs/precision_recall_f1_barcharts.png`, `outputs/detailed_model_analysis.png`, and per-conference author trends (`outputs/*_authors_per_year.png`).
 
-This project is licensed under the MIT License 
 ## 🙏 Acknowledgments
 
-- Built with [Streamlit](https://streamlit.io/) for the interactive dashboard
-- Uses [scikit-learn](https://scikit-learn.org/) for machine learning
-- Network visualization powered by [NetworkX](https://networkx.org/) and [Matplotlib](https://matplotlib.org/)
+- [Streamlit](https://streamlit.io/) for the dashboard
+- [scikit-learn](https://scikit-learn.org/) for machine learning
+- [NetworkX](https://networkx.org/), [Plotly](https://plotly.com/python/) and [Matplotlib](https://matplotlib.org/) for networks and charts
 
 ## 📞 Contact
 
-**Author**: Krishnan   
-**Email**: krish.adaik@gmail.com  
+**Author**: Krishnan
+**Email**: krish.adaik@gmail.com
 **GitHub**: [@krishnanefx](https://github.com/krishnanefx)
-
----
-
-<div align="center">
-
-### 🌟 Star this repository if it helps your research! 🌟
-
-[![GitHub stars](https://img.shields.io/github/stars/krishnanefx/Scholar_Scraper?style=social)](https://github.com/krishnanefx/Scholar_Scraper)
-[![GitHub forks](https://img.shields.io/github/forks/krishnanefx/Scholar_Scraper?style=social)](https://github.com/krishnanefx/Scholar_Scraper)
-
-**🎓 Advancing Academic Intelligence Through Machine Learning**
-
-</div>
