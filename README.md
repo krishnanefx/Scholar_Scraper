@@ -139,3 +139,7 @@ More charts: `outputs/roc_curves_actual_auc.png`, `outputs/precision_recall_f1_b
 **Author**: Krishnan
 **Email**: krish.adaik@gmail.com
 **GitHub**: [@krishnanefx](https://github.com/krishnanefx)
+
+## License
+
+MIT. See [LICENSE](LICENSE).
