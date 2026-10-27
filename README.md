@@ -116,17 +116,7 @@ Scholar_Scraper/
 
 ## 📊 Performance
 
-![Cross-validation performance](outputs/real_auc_performance_analysis.png)
-
-| Conference | Authors scored | Predicted participants | CV AUC | Precision | Recall | F1 |
-|------------|---------------:|-----------------------:|-------:|----------:|-------:|---:|
-| **AAAI 2026** | 43,040 | 2,108 (4.9%) | **0.861** ± 0.003 | **0.894** | 0.629 | 0.739 |
-| **ICLR 2026** | 27,836 | 1,604 (5.8%) | **0.863** ± 0.009 | 0.873 | **0.778** | **0.822** |
-| **NeurIPS 2025** | 35,705 | 2,194 (6.1%) | 0.840 ± 0.011 | 0.875 | 0.693 | 0.773 |
-
-In the committed Excel report, 48.7% (AAAI), 67.1% (NeurIPS) and 70.6% (ICLR) of predicted participants were matched to a scholar profile at the default fuzzy threshold of 95.
-
-More charts: `outputs/roc_curves_actual_auc.png`, `outputs/precision_recall_f1_barcharts.png`, `outputs/detailed_model_analysis.png`, and per-conference author trends (`outputs/*_authors_per_year.png`).
+The cross-validated metrics previously reported here (AUC 0.84–0.86, precision 0.87–0.89) have been withdrawn. They were computed on an isotonic-calibrated model that the prediction scripts don't use to export predictions, and the training set was selected using paper counts that included the target year. A chronological evaluation of the pipeline that actually produces the predictions is being added.
 
 ## 🙏 Acknowledgments
 
